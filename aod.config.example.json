@@ -1,4 +1,10 @@
 {
+  "reviewerAgent": "codex",
+  "defaults": {
+    "agentTimeoutMs": 1800000,
+    "reviewTimeoutMs": 600000,
+    "maxRetries": 0
+  },
   "agents": {
     "codex": {
       "command": "codex",

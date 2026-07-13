@@ -175,6 +175,11 @@ function recoverInterruptedTasks() {
     updateTask(task.id, { status: 'recovery_required', process_pid: null, recovery_note: 'Daemon restarted while work was in progress.' });
     appendEvent('recovery', `${task.id} requires operator confirmation after daemon restart`, task.id);
   }
+  const interruptedReviews = db.prepare("SELECT id, task_id FROM reviews WHERE status = 'running'").all();
+  for (const review of interruptedReviews) {
+    db.prepare('UPDATE reviews SET status = ?, updated_at = ? WHERE id = ?').run('pending', now(), review.id);
+    appendEvent('recovery', `${review.id} reviewer process was interrupted and can be retried`, review.task_id);
+  }
 }
 
 importLegacyState();
