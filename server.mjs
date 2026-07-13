@@ -162,10 +162,11 @@ function taskById(state, id) {
   return task;
 }
 
-function expandArgument(value, task) {
+function expandArgument(value, task, prompt) {
   return value.replaceAll('{{taskId}}', task.id)
     .replaceAll('{{worktree}}', task.worktree)
-    .replaceAll('{{promptFile}}', join(handoffDir, `${task.id}.md`));
+    .replaceAll('{{promptFile}}', join(handoffDir, `${task.id}.md`))
+    .replaceAll('{{prompt}}', prompt);
 }
 
 async function appendOutput(id, chunk) {
@@ -197,10 +198,14 @@ async function startAgent(state, task) {
   if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) {
     throw new Error(`No ${task.agent} adapter is configured. Add it to ${configPath}.`);
   }
+  const promptPath = join(handoffDir, `${task.id}.md`);
+  if (!(await exists(promptPath))) throw new Error('The task handoff file is missing. Prepare the worktree again.');
+  const prompt = await readFile(promptPath, 'utf8');
   const args = adapter.args.map(value => {
     if (typeof value !== 'string') throw new Error('Adapter arguments must be strings.');
-    return expandArgument(value, task);
+    return expandArgument(value, task, prompt);
   });
+  const input = adapter.stdin === undefined ? null : expandArgument(String(adapter.stdin), task, prompt);
   task.status = 'running';
   task.output = '';
   task.startedAt = new Date().toISOString();
@@ -211,9 +216,11 @@ async function startAgent(state, task) {
     cwd: task.worktree,
     shell: false,
     windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: task.worktree }
   });
   processes.set(task.id, child);
+  child.stdin.end(input || undefined);
   child.stdout.on('data', data => { appendOutput(task.id, data.toString()).catch(() => {}); });
   child.stderr.on('data', data => { appendOutput(task.id, data.toString()).catch(() => {}); });
   child.once('error', error => { finishProcess(task.id, child, { ok: false, error }).catch(() => {}); });

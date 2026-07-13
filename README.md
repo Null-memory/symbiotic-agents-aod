@@ -31,5 +31,6 @@ npm start
 - `{{taskId}}`
 - `{{worktree}}`
 - `{{promptFile}}`
+- `{{prompt}}`：完整的任务交接文本，可作为单个 CLI 参数或 `stdin` 内容。
 
 调度器使用配置的命令和参数启动进程，将工作目录设为该任务 worktree，并把标准输出、标准错误保存到任务记录。不同版本的 Codex、Claude Code 与反重力 2.0 命令行参数可能不同，因此示例配置仅是结构模板。

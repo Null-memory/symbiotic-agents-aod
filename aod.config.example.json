@@ -2,15 +2,16 @@
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "{{promptFile}}"]
+      "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"]
     },
     "claude-code": {
       "command": "claude",
-      "args": ["{{promptFile}}"]
+      "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"]
     },
     "antigravity": {
-      "command": "replace-with-antigravity-cli",
-      "args": ["{{promptFile}}"]
+      "command": "antigravity",
+      "args": ["chat", "--mode", "agent", "-"],
+      "stdin": "{{prompt}}"
     }
   }
 }
