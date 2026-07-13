@@ -15,7 +15,7 @@ const transitions = {
   ready: ['running', 'cancelled'],
   running: ['verifying', 'failed', 'paused'],
   paused: ['running', 'cancelled'],
-  verifying: ['merge_ready', 'failed'],
+  verifying: ['failed'],
   merge_ready: ['merged', 'failed'],
   failed: ['ready', 'cancelled'],
   merged: [],
@@ -126,6 +126,18 @@ function run(command, args, cwd = root) {
   });
 }
 
+function runShell(command, cwd) {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(command, { cwd, shell: true, windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', data => { stdout += data; });
+    child.stderr.on('data', data => { stderr += data; });
+    child.on('error', rejectRun);
+    child.on('close', code => code === 0 ? resolveRun({ stdout, stderr }) : rejectRun(new Error(stderr.trim() || stdout.trim() || `Verification exited with ${code}`)));
+  });
+}
+
 async function git(args, cwd = root) { return run('git', args, cwd); }
 
 async function gitReady() {
@@ -233,7 +245,7 @@ async function api(request, response, url) {
     await saveState(state);
     return send(response, 201, task);
   }
-  const matched = url.pathname.match(/^\/api\/tasks\/(T-\d+)(?:\/(prepare|status))?$/);
+  const matched = url.pathname.match(/^\/api\/tasks\/(T-\d+)(?:\/(prepare|status|verify|merge))?$/);
   if (matched && request.method === 'POST') {
     const [, id, action] = matched;
     const task = taskById(state, id);
@@ -260,6 +272,45 @@ async function api(request, response, url) {
       appendEvent(state, 'status', `${id} moved to ${payload.status}`, id);
       await saveState(state);
       return send(response, 200, task);
+    }
+    if (action === 'verify') {
+      if (task.status !== 'verifying') throw new Error('Only tasks in verification can run acceptance checks.');
+      if (!task.worktree || !(await exists(task.worktree))) throw new Error('This task has no prepared worktree.');
+      if (!task.acceptance) throw new Error('Add an acceptance command before verification.');
+      try {
+        const result = await runShell(task.acceptance, task.worktree);
+        task.status = 'merge_ready';
+        task.verification = { at: new Date().toISOString(), command: task.acceptance, output: `${result.stdout}${result.stderr}`.slice(-8000) };
+        task.updatedAt = new Date().toISOString();
+        appendEvent(state, 'verify', `${id} acceptance check passed`, id);
+        await saveState(state);
+        return send(response, 200, task);
+      } catch (error) {
+        task.status = 'failed';
+        task.verification = { at: new Date().toISOString(), command: task.acceptance, output: error instanceof Error ? error.message : 'Verification failed.' };
+        task.updatedAt = new Date().toISOString();
+        appendEvent(state, 'verify', `${id} acceptance check failed`, id);
+        await saveState(state);
+        throw error;
+      }
+    }
+    if (action === 'merge') {
+      if (task.status !== 'merge_ready') throw new Error('Only verified tasks can enter the merge gate.');
+      if (!(await gitReady())) throw new Error('The main repository is not ready for merging.');
+      try {
+        await git(['merge', '--no-ff', task.branch, '-m', `merge: ${task.id} ${task.title}`]);
+        task.status = 'merged';
+        task.updatedAt = new Date().toISOString();
+        appendEvent(state, 'merge', `${id} merged into main`, id);
+        await saveState(state);
+        return send(response, 200, task);
+      } catch (error) {
+        task.status = 'failed';
+        task.updatedAt = new Date().toISOString();
+        appendEvent(state, 'merge', `${id} merge failed`, id);
+        await saveState(state);
+        throw error;
+      }
     }
   }
   return send(response, 404, { error: 'Not found.' });

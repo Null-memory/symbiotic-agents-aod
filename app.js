@@ -45,6 +45,8 @@ function render(state, health) {
       const dependencies = task.dependsOn.length ? task.dependsOn.join(', ') : '无依赖';
       const canPrepare = task.status === 'draft';
       const canMove = state.transitions[task.status]?.length || 0;
+      const canVerify = task.status === 'verifying';
+      const canMerge = task.status === 'merge_ready';
       return `<article class="task-card status-${task.status}">
         <div class="task-meta"><span>${task.id}</span><span>${escapeHtml(task.agent)}</span></div>
         <h3>${escapeHtml(task.title)}</h3>
@@ -52,6 +54,8 @@ function render(state, health) {
         <div class="task-info"><span>依赖：${dependencies}</span><span>分支：${escapeHtml(task.branch)}</span></div>
         <div class="task-foot"><strong>${prettyStatus(task.status)}</strong><div>
           ${canPrepare ? `<button class="small primary" data-prepare="${task.id}">准备 worktree</button>` : ''}
+          ${canVerify ? `<button class="small primary" data-verify="${task.id}">运行验收</button>` : ''}
+          ${canMerge ? `<button class="small primary" data-merge="${task.id}">合并分支</button>` : ''}
           ${canMove ? `<button class="small secondary" data-status="${task.id}">更新状态</button>` : ''}
         </div></div>
       </article>`;
@@ -90,6 +94,8 @@ $('#taskForm').addEventListener('submit', async event => {
 board.addEventListener('click', async event => {
   const prepare = event.target.closest('[data-prepare]');
   const status = event.target.closest('[data-status]');
+  const verify = event.target.closest('[data-verify]');
+  const merge = event.target.closest('[data-merge]');
   try {
     if (prepare) {
       await request(`/api/tasks/${prepare.dataset.prepare}/prepare`, { method: 'POST', body: '{}' });
@@ -102,6 +108,14 @@ board.addEventListener('click', async event => {
       if (!next) return;
       await request(`/api/tasks/${task.id}/status`, { method: 'POST', body: JSON.stringify({ status: next }) });
       tell(`${task.id} 已更新为 ${prettyStatus(next)}。`);
+    }
+    if (verify) {
+      await request(`/api/tasks/${verify.dataset.verify}/verify`, { method: 'POST', body: '{}' });
+      tell('验收命令已通过，任务进入合并队列。');
+    }
+    if (merge) {
+      await request(`/api/tasks/${merge.dataset.merge}/merge`, { method: 'POST', body: '{}' });
+      tell('分支已合并到当前主线。');
     }
     await refresh();
   } catch (error) { tell(error.message, 'error'); }
