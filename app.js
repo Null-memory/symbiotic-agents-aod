@@ -44,6 +44,7 @@ function render(state, health) {
     board.innerHTML = state.tasks.map(task => {
       const dependencies = task.dependsOn.length ? task.dependsOn.join(', ') : '无依赖';
       const canPrepare = task.status === 'draft';
+      const canStart = task.status === 'ready';
       const canMove = state.transitions[task.status]?.length || 0;
       const canVerify = task.status === 'verifying';
       const canMerge = task.status === 'merge_ready';
@@ -54,6 +55,7 @@ function render(state, health) {
         <div class="task-info"><span>依赖：${dependencies}</span><span>分支：${escapeHtml(task.branch)}</span></div>
         <div class="task-foot"><strong>${prettyStatus(task.status)}</strong><div>
           ${canPrepare ? `<button class="small primary" data-prepare="${task.id}">准备 worktree</button>` : ''}
+          ${canStart ? `<button class="small primary" data-start="${task.id}">启动 Agent</button>` : ''}
           ${canVerify ? `<button class="small primary" data-verify="${task.id}">运行验收</button>` : ''}
           ${canMerge ? `<button class="small primary" data-merge="${task.id}">合并分支</button>` : ''}
           ${canMove ? `<button class="small secondary" data-status="${task.id}">更新状态</button>` : ''}
@@ -93,6 +95,7 @@ $('#taskForm').addEventListener('submit', async event => {
 
 board.addEventListener('click', async event => {
   const prepare = event.target.closest('[data-prepare]');
+  const start = event.target.closest('[data-start]');
   const status = event.target.closest('[data-status]');
   const verify = event.target.closest('[data-verify]');
   const merge = event.target.closest('[data-merge]');
@@ -100,6 +103,10 @@ board.addEventListener('click', async event => {
     if (prepare) {
       await request(`/api/tasks/${prepare.dataset.prepare}/prepare`, { method: 'POST', body: '{}' });
       tell('Worktree 已准备，交接说明写入 .aod/handoffs。');
+    }
+    if (start) {
+      await request(`/api/tasks/${start.dataset.start}/start`, { method: 'POST', body: '{}' });
+      tell('Agent 进程已启动，输出会写入任务记录。');
     }
     if (status) {
       const task = current.tasks.find(item => item.id === status.dataset.status);

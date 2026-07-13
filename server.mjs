@@ -7,8 +7,10 @@ const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
 const statePath = join(aodDir, 'state.json');
 const handoffDir = join(aodDir, 'handoffs');
+const configPath = join(root, '.aod.config.json');
 const port = Number(process.env.PORT || 4821);
 const agents = ['codex', 'claude-code', 'antigravity'];
+const processes = new Map();
 const transitions = {
   draft: ['preparing', 'cancelled'],
   preparing: ['ready', 'failed'],
@@ -41,6 +43,12 @@ async function loadState() {
   if (!(await exists(statePath))) return initialState();
   try { return JSON.parse(await readFile(statePath, 'utf8')); }
   catch { throw new Error('The AOD state file is not valid JSON.'); }
+}
+
+async function loadConfig() {
+  if (!(await exists(configPath))) return { agents: {} };
+  try { return JSON.parse(await readFile(configPath, 'utf8')); }
+  catch { throw new Error('The AOD adapter config is not valid JSON.'); }
 }
 
 async function saveState(state) {
@@ -155,6 +163,64 @@ function taskById(state, id) {
   return task;
 }
 
+function expandArgument(value, task) {
+  return value.replaceAll('{{taskId}}', task.id)
+    .replaceAll('{{worktree}}', task.worktree)
+    .replaceAll('{{promptFile}}', join(handoffDir, `${task.id}.md`));
+}
+
+async function appendOutput(id, chunk) {
+  const state = await loadState();
+  const task = taskById(state, id);
+  task.output = `${task.output || ''}${chunk}`.slice(-12000);
+  task.updatedAt = new Date().toISOString();
+  await saveState(state);
+}
+
+async function finishProcess(id, child, outcome) {
+  if (processes.get(id) !== child) return;
+  processes.delete(id);
+  const state = await loadState();
+  const task = taskById(state, id);
+  if (task.status !== 'running') return;
+  task.status = outcome.ok ? 'verifying' : 'failed';
+  task.updatedAt = new Date().toISOString();
+  appendEvent(state, 'agent', outcome.ok ? `${id} agent exited; awaiting verification` : `${id} agent process failed`, id);
+  await saveState(state);
+}
+
+async function startAgent(state, task) {
+  if (task.status !== 'ready') throw new Error('Only prepared tasks can start an agent process.');
+  if (!task.worktree || !(await exists(task.worktree))) throw new Error('This task has no prepared worktree.');
+  if (processes.has(task.id)) throw new Error('An agent process is already attached to this task.');
+  const config = await loadConfig();
+  const adapter = config.agents?.[task.agent];
+  if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) {
+    throw new Error(`No ${task.agent} adapter is configured. Add it to ${configPath}.`);
+  }
+  const args = adapter.args.map(value => {
+    if (typeof value !== 'string') throw new Error('Adapter arguments must be strings.');
+    return expandArgument(value, task);
+  });
+  task.status = 'running';
+  task.output = '';
+  task.startedAt = new Date().toISOString();
+  task.updatedAt = task.startedAt;
+  appendEvent(state, 'agent', `${task.id} started ${task.agent}`, task.id);
+  await saveState(state);
+  const child = spawn(adapter.command, args, {
+    cwd: task.worktree,
+    shell: false,
+    windowsHide: true,
+    env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: task.worktree }
+  });
+  processes.set(task.id, child);
+  child.stdout.on('data', data => { appendOutput(task.id, data.toString()).catch(() => {}); });
+  child.stderr.on('data', data => { appendOutput(task.id, data.toString()).catch(() => {}); });
+  child.once('error', error => { finishProcess(task.id, child, { ok: false, error }).catch(() => {}); });
+  child.once('close', code => { finishProcess(task.id, child, { ok: code === 0 }).catch(() => {}); });
+}
+
 async function prepareWorktree(state, task) {
   if (!dependenciesComplete(state, task) && task.dependsOn.length) throw new Error('Dependencies must be merged before preparing this task.');
   if (!(await gitReady())) throw new Error('This workspace needs an initialized Git repository with at least one commit.');
@@ -246,7 +312,7 @@ async function api(request, response, url) {
     await saveState(state);
     return send(response, 201, task);
   }
-  const matched = url.pathname.match(/^\/api\/tasks\/(T-\d+)(?:\/(prepare|status|verify|merge))?$/);
+  const matched = url.pathname.match(/^\/api\/tasks\/(T-\d+)(?:\/(prepare|start|status|verify|merge))?$/);
   if (matched && request.method === 'POST') {
     const [, id, action] = matched;
     const task = taskById(state, id);
@@ -263,6 +329,10 @@ async function api(request, response, url) {
         throw error;
       }
       await saveState(state);
+      return send(response, 200, task);
+    }
+    if (action === 'start') {
+      await startAgent(state, task);
       return send(response, 200, task);
     }
     if (action === 'status') {

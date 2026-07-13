@@ -1,0 +1,16 @@
+{
+  "agents": {
+    "codex": {
+      "command": "codex",
+      "args": ["exec", "{{promptFile}}"]
+    },
+    "claude-code": {
+      "command": "claude",
+      "args": ["{{promptFile}}"]
+    },
+    "antigravity": {
+      "command": "replace-with-antigravity-cli",
+      "args": ["{{promptFile}}"]
+    }
+  }
+}
