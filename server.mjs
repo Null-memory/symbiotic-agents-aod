@@ -127,6 +127,7 @@ function run(command, args, cwd = root) {
 }
 
 function runShell(command, cwd) {
+  // Acceptance commands are defined by the task author and run only in its isolated worktree.
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, { cwd, shell: true, windowsHide: true });
     let stdout = '';
