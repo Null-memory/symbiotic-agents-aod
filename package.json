@@ -1,5 +1,7 @@
 {
   "name": "symbiotic-agents-aod",
+  "description": "Local multi-agent orchestration runtime",
+  "keywords": ["agents", "worktree", "orchestration"],
   "version": "0.1.0",
   "private": true,
   "type": "module",
