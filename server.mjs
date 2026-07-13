@@ -10,9 +10,9 @@ const handoffDir = join(aodDir, 'handoffs');
 const port = Number(process.env.PORT || 4821);
 const agents = ['codex', 'claude-code', 'antigravity'];
 const transitions = {
-  draft: ['ready', 'cancelled'],
-  ready: ['preparing', 'cancelled'],
+  draft: ['preparing', 'cancelled'],
   preparing: ['ready', 'failed'],
+  ready: ['running', 'cancelled'],
   running: ['verifying', 'failed', 'paused'],
   paused: ['running', 'cancelled'],
   verifying: ['merge_ready', 'failed'],
@@ -238,6 +238,7 @@ async function api(request, response, url) {
     const [, id, action] = matched;
     const task = taskById(state, id);
     if (action === 'prepare') {
+      if (task.status !== 'draft') throw new Error('Only draft tasks can prepare a worktree.');
       task.status = 'preparing';
       await saveState(state);
       try { await prepareWorktree(state, task); }

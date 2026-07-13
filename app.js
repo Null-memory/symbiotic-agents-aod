@@ -73,6 +73,10 @@ $('#openTaskDialog').addEventListener('click', () => dialog.showModal());
 $('#refresh').addEventListener('click', refresh);
 $('#taskForm').addEventListener('submit', async event => {
   event.preventDefault();
+  if (event.submitter?.value === 'cancel') {
+    dialog.close();
+    return;
+  }
   const form = new FormData(event.currentTarget);
   try {
     await request('/api/tasks', { method: 'POST', body: JSON.stringify({
