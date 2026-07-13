@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Symbiotic Agents</title>
     <link rel="stylesheet" href="styles.css" />
+    <style>
+      .status-select { width: 116px; height: 28px; cursor: pointer; }
+      @media (max-width: 520px) {
+        body { overflow-x: hidden; }
+        .shell { width: calc(100vw - 28px); max-width: 1240px; }
+        .hero, .hero > div, .board, .task-card { min-width: 0; }
+        .summary, .board, .details-grid { max-width: 100%; }
+        .task-info span { min-width: 0; overflow-wrap: anywhere; }
+        .lede { word-break: break-all; }
+        .health { max-width: 92px; white-space: normal; text-align: right; line-height: 1.3; }
+        h1 { font-size: 34px; line-height: 1.1; overflow-wrap: anywhere; }
+        h1 em { display: block; }
+      }
+    </style>
   </head>
   <body>
     <main class="shell">

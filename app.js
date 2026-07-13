@@ -24,7 +24,7 @@ function escapeHtml(value) {
 }
 
 function prettyStatus(status) {
-  return { draft: '草稿', ready: '就绪', preparing: '准备中', running: '运行中', paused: '已暂停', verifying: '验证中', merge_ready: '待合并', merged: '已合并', failed: '失败', cancelled: '已取消' }[status] || status;
+  return { draft: '草稿', ready: '就绪', preparing: '准备中', running: '运行中', verifying: '验证中', merge_ready: '待合并', merged: '已合并', failed: '失败', cancelled: '已取消' }[status] || status;
 }
 
 function render(state, health) {
@@ -48,6 +48,10 @@ function render(state, health) {
       const canMove = state.transitions[task.status]?.length || 0;
       const canVerify = task.status === 'verifying';
       const canMerge = task.status === 'merge_ready';
+      const transitionOptions = canMove ? `<select class="small secondary status-select" data-status="${task.id}" aria-label="更新 ${task.id} 状态">
+        <option value="">更新状态</option>
+        ${state.transitions[task.status].map(status => `<option value="${status}">${prettyStatus(status)}</option>`).join('')}
+      </select>` : '';
       return `<article class="task-card status-${task.status}">
         <div class="task-meta"><span>${task.id}</span><span>${escapeHtml(task.agent)}</span></div>
         <h3>${escapeHtml(task.title)}</h3>
@@ -58,7 +62,7 @@ function render(state, health) {
           ${canStart ? `<button class="small primary" data-start="${task.id}">启动 Agent</button>` : ''}
           ${canVerify ? `<button class="small primary" data-verify="${task.id}">运行验收</button>` : ''}
           ${canMerge ? `<button class="small primary" data-merge="${task.id}">合并分支</button>` : ''}
-          ${canMove ? `<button class="small secondary" data-status="${task.id}">更新状态</button>` : ''}
+          ${transitionOptions}
         </div></div>
       </article>`;
     }).join('');
@@ -96,7 +100,6 @@ $('#taskForm').addEventListener('submit', async event => {
 board.addEventListener('click', async event => {
   const prepare = event.target.closest('[data-prepare]');
   const start = event.target.closest('[data-start]');
-  const status = event.target.closest('[data-status]');
   const verify = event.target.closest('[data-verify]');
   const merge = event.target.closest('[data-merge]');
   try {
@@ -108,14 +111,6 @@ board.addEventListener('click', async event => {
       await request(`/api/tasks/${start.dataset.start}/start`, { method: 'POST', body: '{}' });
       tell('Agent 进程已启动，输出会写入任务记录。');
     }
-    if (status) {
-      const task = current.tasks.find(item => item.id === status.dataset.status);
-      const choices = current.transitions[task.status];
-      const next = window.prompt(`选择下一个状态：${choices.join(', ')}`, choices[0]);
-      if (!next) return;
-      await request(`/api/tasks/${task.id}/status`, { method: 'POST', body: JSON.stringify({ status: next }) });
-      tell(`${task.id} 已更新为 ${prettyStatus(next)}。`);
-    }
     if (verify) {
       await request(`/api/tasks/${verify.dataset.verify}/verify`, { method: 'POST', body: '{}' });
       tell('验收命令已通过，任务进入合并队列。');
@@ -126,6 +121,20 @@ board.addEventListener('click', async event => {
     }
     await refresh();
   } catch (error) { tell(error.message, 'error'); }
+});
+
+board.addEventListener('change', async event => {
+  const select = event.target.closest('[data-status]');
+  if (!select?.value) return;
+  const task = current.tasks.find(item => item.id === select.dataset.status);
+  try {
+    await request(`/api/tasks/${task.id}/status`, { method: 'POST', body: JSON.stringify({ status: select.value }) });
+    tell(`${task.id} 已更新为 ${prettyStatus(select.value)}。`);
+    await refresh();
+  } catch (error) {
+    tell(error.message, 'error');
+    select.value = '';
+  }
 });
 
 refresh();
