@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Symbiotic Agents</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div class="brand"><span>S/</span> SYMBIOTIC AGENTS</div>
+        <div class="workspace" id="workspace">Loading workspace</div>
+        <div class="health" id="health">Checking daemon</div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="kicker">AOD / LOCAL ORCHESTRATION</p>
+          <h1>让 Agent 并行，<em>而不是相互覆盖。</em></h1>
+          <p class="lede">每个任务拥有明确的文件边界、依赖关系和隔离工作区。共享的是同一仓库目标，不是同一份正在写入的文件。</p>
+        </div>
+        <button class="primary" id="openTaskDialog">新建协同任务</button>
+      </section>
+
+      <section class="summary" aria-label="运行摘要">
+        <article><span>全部任务</span><strong id="taskCount">0</strong></article>
+        <article><span>隔离工作区</span><strong id="worktreeCount">0</strong></article>
+        <article><span>待合并</span><strong id="mergeCount">0</strong></article>
+        <article><span>Git 状态</span><strong id="gitState">Checking</strong></article>
+      </section>
+
+      <section class="board-section">
+        <div class="section-head"><div><p class="kicker">TASK DAG</p><h2>协同队列</h2></div><button class="text-button" id="refresh">刷新</button></div>
+        <div class="board" id="taskBoard"><p class="empty">正在读取任务状态。</p></div>
+      </section>
+
+      <section class="details-grid">
+        <article class="panel">
+          <div class="section-head"><div><p class="kicker">HANDOFF PROTOCOL</p><h2>执行规则</h2></div></div>
+          <ol class="protocol">
+            <li><b>创建任务</b><span>声明 Agent、拥有的文件路径和验收命令。</span></li>
+            <li><b>准备 worktree</b><span>从当前基线创建独立分支与工作目录。</span></li>
+            <li><b>执行与提交</b><span>Agent 只修改已声明范围，提交后进入验证。</span></li>
+            <li><b>受控合并</b><span>依赖完成且测试通过，才允许进入集成队列。</span></li>
+          </ol>
+        </article>
+        <article class="panel event-panel">
+          <div class="section-head"><div><p class="kicker">EVENT STREAM</p><h2>编排记录</h2></div></div>
+          <div class="events" id="events"><p class="empty">暂无事件。</p></div>
+        </article>
+      </section>
+    </main>
+
+    <dialog id="taskDialog">
+      <form method="dialog" id="taskForm">
+        <div class="dialog-head"><div><p class="kicker">NEW UNIT OF WORK</p><h2>新建协同任务</h2></div><button class="close" value="cancel" aria-label="关闭">x</button></div>
+        <label>任务标题<input name="title" required maxlength="100" placeholder="例如：实现本地任务 API" /></label>
+        <label>执行 Agent<select name="agent"><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">反重力 2.0</option></select></label>
+        <label>拥有的文件或目录<input name="files" required placeholder="server.mjs, src/api" /></label>
+        <label>依赖任务<select name="dependsOn" id="dependsOn"><option value="">无</option></select></label>
+        <label>验收命令<input name="acceptance" placeholder="npm run check" /></label>
+        <div class="dialog-actions"><button class="secondary" value="cancel">取消</button><button class="primary" value="default">创建任务</button></div>
+      </form>
+    </dialog>
+
+    <div class="notice" id="notice" role="status"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
