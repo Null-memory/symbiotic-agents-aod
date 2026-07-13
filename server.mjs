@@ -18,7 +18,7 @@ const transitions = {
   running: ['verifying', 'failed', 'paused'],
   paused: ['running', 'cancelled'],
   verifying: ['failed'],
-  merge_ready: ['merged', 'failed'],
+  merge_ready: ['failed'],
   failed: ['ready', 'cancelled'],
   merged: [],
   cancelled: []
@@ -368,6 +368,8 @@ async function api(request, response, url) {
     if (action === 'merge') {
       if (task.status !== 'merge_ready') throw new Error('Only verified tasks can enter the merge gate.');
       if (!(await gitReady())) throw new Error('The main repository is not ready for merging.');
+      const ahead = await git(['rev-list', '--count', `HEAD..${task.branch}`]);
+      if (Number(ahead.stdout.trim()) < 1) throw new Error('The task branch has no commits to merge.');
       try {
         await git(['merge', '--no-ff', task.branch, '-m', `merge: ${task.id} ${task.title}`]);
         task.status = 'merged';
