@@ -77,8 +77,8 @@ function cleanPaths(files) {
 }
 
 function pathsOverlap(left, right) {
-  const a = left.replaceAll('\\', '/').replace(/\/$/, '');
-  const b = right.replaceAll('\\', '/').replace(/\/$/, '');
+  const a = left.replaceAll('\\', '/').replace(/\/$/, '').toLocaleLowerCase('en-US');
+  const b = right.replaceAll('\\', '/').replace(/\/$/, '').toLocaleLowerCase('en-US');
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
