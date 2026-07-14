@@ -20,7 +20,7 @@
           <h1>让并行有秩序，<em>让交付可恢复。</em></h1>
           <p class="lede">任务、工作区、进程输出、验收记录和冲突审查全部落盘。主线只接收通过当前提交验证的变更。</p>
         </div>
-        <button class="primary" id="openTaskDialog">新建协同任务</button>
+        <div class="hero-actions"><button class="secondary" id="openTaskDialog">单个任务</button><button class="primary" id="openRunDialog">新建运行</button></div>
       </section>
 
       <section class="control-strip" aria-label="运行控制">
@@ -33,10 +33,15 @@
       </section>
 
       <section class="summary" aria-label="运行摘要">
-        <article><span>全部任务</span><strong id="taskCount">0</strong></article>
+        <article><span>运行单元</span><strong id="runCount">0</strong></article>
         <article><span>活跃进程</span><strong id="agentCount">0 / 0</strong></article>
         <article><span>待合并</span><strong id="mergeCount">0</strong></article>
         <article><span>冲突审查</span><strong id="conflictCount">0</strong></article>
+      </section>
+
+      <section class="runs-section panel">
+        <div class="section-head"><div><p class="kicker">DELIVERY RUNS</p><h2>运行与 GitHub 交付</h2></div><div class="github-status" id="githubStatus">GitHub 检查中</div></div>
+        <div class="runs-board" id="runsBoard"><p class="empty">还没有运行单元。新建运行可让 Codex 先生成任务 DAG。</p></div>
       </section>
 
       <section class="board-section">
@@ -85,6 +90,21 @@
         <div class="form-row"><label>超时分钟<input name="timeoutMinutes" type="number" min="1" max="180" value="30" /></label><label>自动重试<input name="maxRetries" type="number" min="0" max="3" value="0" /></label></div>
         <div class="dialog-actions"><button class="secondary" value="cancel">取消</button><button class="primary" value="default">创建任务</button></div>
       </form>
+    </dialog>
+
+    <dialog id="runDialog">
+      <form method="dialog" id="runForm">
+        <div class="dialog-head"><div><p class="kicker">PLAN A DELIVERY RUN</p><h2>从需求生成 DAG</h2></div><button class="close" value="cancel" aria-label="关闭">x</button></div>
+        <label>需求描述<textarea name="requirement" required placeholder="描述要交付的功能、范围和验收目标。Codex 将生成带文件边界和依赖关系的任务 DAG。"></textarea></label>
+        <label>规划器<select name="planner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label>
+        <div class="dialog-actions"><button class="secondary" value="cancel">取消</button><button class="primary" value="default">生成预览</button></div>
+      </form>
+      <section class="plan-preview" id="planPreview" hidden>
+        <div class="section-head"><div><p class="kicker">DAG PREVIEW</p><h2 id="planTitle">待确认计划</h2></div></div>
+        <p id="planRequirement" class="plan-requirement"></p>
+        <label>任务 JSON<textarea id="planTasks"></textarea></label>
+        <div class="dialog-actions"><button class="secondary" id="discardPlan" type="button">放弃</button><button class="primary" id="confirmPlan" type="button">确认创建运行</button></div>
+      </section>
     </dialog>
 
     <div class="notice" id="notice" role="status"></div>

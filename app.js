@@ -2,9 +2,13 @@ const $ = selector => document.querySelector(selector);
 const board = $('#taskBoard');
 const notice = $('#notice');
 const dialog = $('#taskDialog');
+const runDialog = $('#runDialog');
 let state = null;
 let selectedTaskId = null;
 let noticeTimer;
+let plannedRun = null;
+let stream = null;
+let refreshTimer;
 
 const statusLabels = {
   draft: '草稿', preparing: '准备中', ready: '就绪', running: '运行中', verifying: '验证中', merge_ready: '待合并', merging: '合并中', conflict_review: '冲突审查', recovery_required: '恢复确认', failed: '失败', cancelled: '已取消', merged: '已合并'
@@ -39,6 +43,18 @@ function taskActions(task) {
   const next = state.transitions[task.status] || [];
   if (next.length) actions.push(`<select class="small secondary status-select" data-status="${task.id}" aria-label="更新 ${task.id} 状态"><option value="">更新状态</option>${next.map(value => `<option value="${value}">${statusLabel(value)}</option>`).join('')}</select>`);
   return actions.join('');
+}
+
+function renderRuns() {
+  const runsBoard = $('#runsBoard');
+  if (!state.runs?.length) { runsBoard.innerHTML = '<p class="empty">还没有运行单元。新建运行可让 Codex 先生成任务 DAG。</p>'; return; }
+  runsBoard.innerHTML = state.runs.map(run => {
+    const tasks = state.tasks.filter(task => task.run_id === run.id);
+    const merged = tasks.filter(task => task.status === 'merged').length;
+    const publish = run.status === 'ready_to_publish' ? `<button class="small primary" data-run-action="publish" data-run-id="${run.id}">发布 PR</button>` : '';
+    const refresh = run.github_pr_number ? `<button class="small secondary" data-run-action="refresh" data-run-id="${run.id}">刷新 CI</button>` : '';
+    return `<article class="run-card status-${run.status}"><div class="task-meta"><span>${run.id}</span><span>${modeLabel(run.mode)}</span></div><h3>${escapeHtml(run.title)}</h3><p>${escapeHtml(run.requirement)}</p><div class="run-meta"><span>${merged}/${tasks.length} 已合并</span><span>${escapeHtml(run.integration_branch)}</span><span>CI: ${escapeHtml(run.ci_status)}</span></div><div class="task-foot"><strong>${escapeHtml(run.status)}</strong><div>${publish}${refresh}${run.github_pr_url ? `<a class="small secondary" href="${escapeHtml(run.github_pr_url)}" target="_blank" rel="noreferrer">打开 PR</a>` : ''}</div></div></article>`;
+  }).join('');
 }
 
 function renderBoard() {
@@ -87,25 +103,62 @@ function render(nextState, health) {
   $('#modeDescription').textContent = modeCopy[state.mode];
   $('#maxConcurrency').value = state.maxConcurrency;
   $('#modeSwitch').querySelectorAll('button').forEach(button => button.classList.toggle('active', button.dataset.mode === state.mode));
-  $('#taskCount').textContent = state.stats.total;
+  $('#runCount').textContent = state.stats.runs;
   $('#agentCount').textContent = `${state.runtime.activeAgents} / ${state.maxConcurrency}`;
   $('#mergeCount').textContent = state.stats.mergeReady;
   $('#conflictCount').textContent = state.stats.conflicts;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
-  renderBoard(); renderDetail(); renderReview(); renderEvents();
+  renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
 }
 
 async function refresh() {
-  try { const [nextState, health] = await Promise.all([request('/api/state'), request('/api/health')]); render(nextState, health); }
+  try {
+    const [nextState, health, github] = await Promise.all([request('/api/state'), request('/api/health'), request('/api/github/status').catch(error => ({ error: error.message }))]);
+    render(nextState, health);
+    $('#githubStatus').textContent = github.authenticated ? `GitHub 已连接${github.remote ? ' / origin 已配置' : ' / 未配置远程'}` : github.available ? 'GitHub 未认证，点击连接' : 'GitHub CLI 未安装';
+    $('#githubStatus').classList.toggle('warning', !github.authenticated);
+  }
   catch (error) { tell(error.message, 'error'); }
 }
 
+function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 120); }
+function connectStream() {
+  if (stream) stream.close();
+  stream = new EventSource('/api/stream');
+  stream.addEventListener('event', scheduleRefresh);
+  stream.addEventListener('log', scheduleRefresh);
+  stream.onerror = () => { stream.close(); stream = null; setTimeout(connectStream, 2000); };
+}
+
 $('#openTaskDialog').addEventListener('click', () => dialog.showModal());
+$('#openRunDialog').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; runDialog.showModal(); });
 $('#refresh').addEventListener('click', refresh);
+$('#githubStatus').addEventListener('click', async () => { try { const result = await request('/api/github/connect', { method: 'POST', body: '{}' }); tell(result.message || 'GitHub 已连接。'); await refresh(); } catch (error) { tell(error.message, 'error'); } });
 $('#modeSwitch').addEventListener('click', event => { const button = event.target.closest('[data-mode]'); if (button) $('#modeSwitch').dataset.pendingMode = button.dataset.mode; $('#modeSwitch').querySelectorAll('button').forEach(item => item.classList.toggle('active', item === button)); });
 $('#saveSettings').addEventListener('click', async () => {
   try { await request('/api/settings', { method: 'POST', body: JSON.stringify({ mode: $('#modeSwitch').dataset.pendingMode || state.mode, maxConcurrency: Number($('#maxConcurrency').value) }) }); tell('运行策略已更新。'); await refresh(); }
   catch (error) { tell(error.message, 'error'); }
+});
+
+$('#runForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') return runDialog.close();
+  const form = new FormData(event.currentTarget);
+  try {
+    plannedRun = await request('/api/runs/plan', { method: 'POST', body: JSON.stringify({ requirement: form.get('requirement'), planner: form.get('planner') }) });
+    $('#planTitle').textContent = plannedRun.title;
+    $('#planRequirement').textContent = plannedRun.requirement;
+    $('#planTasks').value = JSON.stringify(plannedRun.tasks, null, 2);
+    $('#planPreview').hidden = false;
+  } catch (error) { tell(error.message, 'error'); }
+});
+$('#discardPlan').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; });
+$('#confirmPlan').addEventListener('click', async () => {
+  try {
+    const tasks = JSON.parse($('#planTasks').value);
+    const run = await request('/api/runs', { method: 'POST', body: JSON.stringify({ planId: plannedRun.id, title: $('#planTitle').textContent, tasks }) });
+    tell(`${run.id} 已创建，集成分支和任务已准备。`); runDialog.close(); await refresh();
+  } catch (error) { tell(error.message || '任务 JSON 无效。', 'error'); }
 });
 
 $('#taskForm').addEventListener('submit', async event => {
@@ -132,6 +185,14 @@ board.addEventListener('change', async event => {
   try { await request(`/api/tasks/${select.dataset.status}/status`, { method: 'POST', body: JSON.stringify({ status: select.value }) }); tell('任务状态已更新。'); await refresh(); }
   catch (error) { select.value = ''; tell(error.message, 'error'); }
 });
+$('#runsBoard').addEventListener('click', async event => {
+  const action = event.target.closest('[data-run-action]'); if (!action) return;
+  try {
+    const endpoint = action.dataset.runAction === 'publish' ? 'publish' : 'refresh';
+    await request(`/api/runs/${action.dataset.runId}/${endpoint}`, { method: 'POST', body: '{}' });
+    tell(endpoint === 'publish' ? '运行分支已推送并创建 PR。' : 'CI 状态已刷新。'); await refresh();
+  } catch (error) { tell(error.message, 'error'); }
+});
 $('#reviewContent').addEventListener('click', async event => {
   const button = event.target.closest('[data-review-approve]'); if (!button) return;
   try { await request(`/api/reviews/${button.dataset.reviewApprove}/approve`, { method: 'POST', body: JSON.stringify({ patch: $('#approvedPatch').value }) }); tell('补丁已应用到任务 worktree，正在重新验收。'); await refresh(); }
@@ -139,3 +200,4 @@ $('#reviewContent').addEventListener('click', async event => {
 });
 
 refresh();
+connectStream();

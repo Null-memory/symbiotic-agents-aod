@@ -3,7 +3,11 @@
   "defaults": {
     "agentTimeoutMs": 1800000,
     "reviewTimeoutMs": 600000,
+    "plannerTimeoutMs": 600000,
     "maxRetries": 0
+  },
+  "security": {
+    "allowedAcceptancePrefixes": ["npm ", "node ", "pnpm ", "yarn ", "git ", "python ", "py "]
   },
   "agents": {
     "codex": {
