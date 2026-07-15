@@ -1,9 +1,11 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
+import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 
 const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
@@ -13,13 +15,15 @@ const handoffDir = join(aodDir, 'handoffs');
 const configPath = join(root, '.aod.config.json');
 const port = Number(process.env.PORT || 4821);
 const agents = ['codex', 'claude-code', 'antigravity'];
-const statuses = ['draft', 'preparing', 'ready', 'running', 'verifying', 'merge_ready', 'merging', 'conflict_review', 'recovery_required', 'failed', 'cancelled', 'merged'];
+const statuses = ['draft', 'preparing', 'ready', 'running', 'verifying', 'reviewing', 'repairing', 'merge_ready', 'merging', 'conflict_review', 'recovery_required', 'failed', 'cancelled', 'merged'];
 const transitions = {
   draft: ['preparing', 'cancelled'],
   preparing: ['ready', 'failed'],
   ready: ['running', 'cancelled'],
   running: ['verifying', 'failed'],
   verifying: ['failed'],
+  reviewing: ['recovery_required', 'failed'],
+  repairing: ['recovery_required', 'failed'],
   merge_ready: ['failed'],
   merging: ['failed'],
   conflict_review: [],
@@ -31,7 +35,14 @@ const transitions = {
 const runtimeModes = ['manual', 'hybrid', 'auto'];
 const taskProcesses = new Map();
 const reviewProcesses = new Map();
+const groupProcesses = new Map();
+const roleProcesses = new Map();
+const plannerProcesses = new Map();
 const eventStreams = new Set();
+const streamReplay = [];
+let streamEventId = 0;
+let pendingAgentStarts = 0;
+let githubLogin = null;
 let advanceQueue = Promise.resolve();
 
 mkdirSync(aodDir, { recursive: true });
@@ -128,6 +139,89 @@ db.exec(`
     stream TEXT NOT NULL,
     message TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS agent_groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    moderator_member_id TEXT,
+    max_rounds INTEGER NOT NULL DEFAULT 3,
+    max_repairs INTEGER NOT NULL DEFAULT 2,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS agent_group_members (
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES agent_groups(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    role TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    instructions TEXT NOT NULL DEFAULT '',
+    position INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(group_id, key),
+    UNIQUE(group_id, agent)
+  );
+  CREATE TABLE IF NOT EXISTS group_sessions (
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES agent_groups(id),
+    requirement TEXT NOT NULL,
+    member_snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_round INTEGER NOT NULL DEFAULT 0,
+    max_rounds INTEGER NOT NULL,
+    max_repairs INTEGER NOT NULL,
+    consensus_json TEXT,
+    run_id TEXT REFERENCES runs(id),
+    pause_requested INTEGER NOT NULL DEFAULT 0,
+    recovery_note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS group_turns (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES group_sessions(id) ON DELETE CASCADE,
+    member_id TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prompt_hash TEXT,
+    output TEXT NOT NULL DEFAULT '',
+    process_pid INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 0,
+    timeout_ms INTEGER NOT NULL,
+    exit_code INTEGER,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS group_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES group_sessions(id) ON DELETE CASCADE,
+    turn_id TEXT REFERENCES group_turns(id) ON DELETE SET NULL,
+    round INTEGER NOT NULL,
+    sender_kind TEXT NOT NULL,
+    sender_member_id TEXT,
+    phase TEXT NOT NULL,
+    content TEXT NOT NULL,
+    at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS task_role_assignments (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES group_sessions(id) ON DELETE CASCADE,
+    executor_member_id TEXT NOT NULL,
+    reviewer_member_id TEXT NOT NULL,
+    fixer_member_id TEXT,
+    stage TEXT NOT NULL,
+    repair_count INTEGER NOT NULL DEFAULT 0,
+    max_repairs INTEGER NOT NULL DEFAULT 0,
+    review_commit TEXT,
+    review_json TEXT,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 function ensureColumn(table, column, definition) {
@@ -181,9 +275,144 @@ function listRuns() { return db.prepare('SELECT * FROM runs ORDER BY created_at 
 function getRun(id) { return runFromRow(db.prepare('SELECT * FROM runs WHERE id = ?').get(id)); }
 function getReview(id) { return reviewFromRow(db.prepare('SELECT * FROM reviews WHERE id = ?').get(id)); }
 function listReviews() { return db.prepare('SELECT * FROM reviews ORDER BY created_at DESC').all().map(reviewFromRow); }
+function groupFromRow(row) {
+  if (!row) return null;
+  const members = db.prepare('SELECT * FROM agent_group_members WHERE group_id = ? ORDER BY position ASC').all(row.id)
+    .map(member => ({ ...member, enabled: Boolean(member.enabled), is_moderator: member.id === row.moderator_member_id }));
+  return { ...row, members };
+}
+function listGroups() { return db.prepare("SELECT * FROM agent_groups WHERE status != 'archived' ORDER BY created_at DESC").all().map(groupFromRow); }
+function getGroup(id) { return groupFromRow(db.prepare('SELECT * FROM agent_groups WHERE id = ?').get(id)); }
+function groupSessionFromRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    members: json(row.member_snapshot_json, []),
+    consensus: json(row.consensus_json, null),
+    pause_requested: Boolean(row.pause_requested),
+    turns: db.prepare('SELECT * FROM group_turns WHERE session_id = ? ORDER BY created_at ASC').all(row.id),
+    assignments: db.prepare('SELECT * FROM task_role_assignments WHERE session_id = ? ORDER BY task_id ASC').all(row.id).map(item => ({ ...item, review: json(item.review_json, null) }))
+  };
+}
+function getGroupSession(id) { return groupSessionFromRow(db.prepare('SELECT * FROM group_sessions WHERE id = ?').get(id)); }
+function listGroupSessions() { return db.prepare('SELECT * FROM group_sessions ORDER BY created_at DESC').all().map(groupSessionFromRow); }
+function getGroupTurn(id) { return db.prepare('SELECT * FROM group_turns WHERE id = ?').get(id) || null; }
 function requireTask(id) { const task = getTask(id); if (!task) throw new Error(`Task ${id} was not found.`); return task; }
 function requireRun(id) { const run = getRun(id); if (!run) throw new Error(`Run ${id} was not found.`); return run; }
 function requireReview(id) { const review = getReview(id); if (!review) throw new Error(`Review ${id} was not found.`); return review; }
+function requireGroup(id) { const group = getGroup(id); if (!group) throw new Error(`Group ${id} was not found.`); return group; }
+function requireGroupSession(id) { const session = getGroupSession(id); if (!session) throw new Error(`Group session ${id} was not found.`); return session; }
+function requireGroupTurn(id) { const turn = getGroupTurn(id); if (!turn) throw new Error(`Group turn ${id} was not found.`); return turn; }
+
+function updateGroupSession(id, fields) {
+  const current = requireGroupSession(id);
+  const next = { ...current, ...fields, updated_at: now() };
+  db.prepare(`UPDATE group_sessions SET status = ?, current_round = ?, consensus_json = ?, run_id = ?, pause_requested = ?, recovery_note = ?, updated_at = ?, finished_at = ? WHERE id = ?`)
+    .run(next.status, next.current_round, next.consensus ? JSON.stringify(next.consensus) : null, next.run_id || null, next.pause_requested ? 1 : 0, next.recovery_note || null, next.updated_at, next.finished_at || null, id);
+  broadcast('group_session', { id, status: next.status, currentRound: next.current_round, at: next.updated_at });
+  return requireGroupSession(id);
+}
+
+function getTaskRoleAssignment(taskId) {
+  const row = db.prepare('SELECT * FROM task_role_assignments WHERE task_id = ?').get(taskId);
+  return row ? { ...row, review: json(row.review_json, null) } : null;
+}
+
+function updateTaskRoleAssignment(taskId, fields) {
+  const current = getTaskRoleAssignment(taskId);
+  if (!current) throw new Error(`Task role assignment for ${taskId} was not found.`);
+  const next = { ...current, ...fields };
+  db.prepare('UPDATE task_role_assignments SET stage = ?, repair_count = ?, review_commit = ?, review_json = ?, updated_at = ? WHERE task_id = ?')
+    .run(next.stage, next.repair_count, next.review_commit || null, next.review ? JSON.stringify(next.review) : null, now(), taskId);
+  broadcast('task_role', { taskId, sessionId: next.session_id, stage: next.stage, repairCount: next.repair_count, at: now() });
+  return getTaskRoleAssignment(taskId);
+}
+
+function appendGroupMessage(sessionId, { turnId = null, round = 0, senderKind, senderMemberId = null, phase, content }) {
+  const message = redactSecrets(content).slice(-12000);
+  const result = db.prepare('INSERT INTO group_messages(session_id, turn_id, round, sender_kind, sender_member_id, phase, content, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(sessionId, turnId, round, senderKind, senderMemberId, phase, message, now());
+  broadcast('group_message', { id: Number(result.lastInsertRowid), sessionId, turnId, round, senderKind, senderMemberId, phase, content: message, at: now() });
+  return Number(result.lastInsertRowid);
+}
+
+function createGroupSession(group, payload) {
+  if (typeof payload.requirement !== 'string' || !payload.requirement.trim()) throw new Error('A group session requires a natural-language requirement.');
+  if (group.status !== 'active') throw new Error('Only active groups can create sessions.');
+  const id = `GS-${String(Number(db.prepare('SELECT COUNT(*) AS count FROM group_sessions').get().count) + 1).padStart(3, '0')}`;
+  const createdAt = now();
+  const snapshot = group.members.filter(member => member.enabled).map(member => ({
+    id: member.id, key: member.key, agent: member.agent, role: member.role, displayName: member.display_name,
+    instructions: member.instructions, isModerator: member.is_moderator
+  }));
+  db.prepare(`INSERT INTO group_sessions(id, group_id, requirement, member_snapshot_json, status, current_round, max_rounds, max_repairs, pause_requested, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'draft', 0, ?, ?, 0, ?, ?)`)
+    .run(id, group.id, payload.requirement.trim(), JSON.stringify(snapshot), group.max_rounds, group.max_repairs, createdAt, createdAt);
+  appendEvent('group_session', `${id} created for ${group.id}`);
+  return requireGroupSession(id);
+}
+
+function createGroup(payload) {
+  const draft = validateGroupDraft(payload, agents);
+  const id = `G-${String(Number(db.prepare('SELECT COUNT(*) AS count FROM agent_groups').get().count) + 1).padStart(3, '0')}`;
+  const createdAt = now();
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT INTO agent_groups(id, name, description, status, max_rounds, max_repairs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, draft.name, draft.description, 'active', draft.maxRounds, draft.maxRepairs, createdAt, createdAt);
+    let moderatorId = null;
+    draft.members.forEach((member, position) => {
+      const memberId = `${id}-M${position + 1}`;
+      db.prepare('INSERT INTO agent_group_members(id, group_id, key, agent, role, display_name, instructions, position, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)')
+        .run(memberId, id, member.key, member.agent, member.role, member.displayName || member.key, member.instructions, position);
+      if (member.key === draft.moderatorKey) moderatorId = memberId;
+    });
+    db.prepare('UPDATE agent_groups SET moderator_member_id = ? WHERE id = ?').run(moderatorId, id);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  appendEvent('group', `${id} created`);
+  return requireGroup(id);
+}
+
+function patchGroup(group, payload) {
+  const members = group.members.map(member => ({ key: member.key, agent: member.agent, role: member.role, displayName: member.display_name, instructions: member.instructions }));
+  const draft = validateGroupDraft({
+    name: payload.name ?? group.name, description: payload.description ?? group.description,
+    maxRounds: payload.maxRounds ?? group.max_rounds, maxRepairs: payload.maxRepairs ?? group.max_repairs,
+    members: payload.members ?? members,
+    moderatorKey: payload.moderatorKey ?? group.members.find(member => member.is_moderator)?.key
+  }, agents);
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE agent_groups SET name = ?, description = ?, max_rounds = ?, max_repairs = ?, moderator_member_id = NULL, updated_at = ? WHERE id = ?')
+      .run(draft.name, draft.description, draft.maxRounds, draft.maxRepairs, now(), group.id);
+    db.prepare('DELETE FROM agent_group_members WHERE group_id = ?').run(group.id);
+    let moderatorId = null;
+    draft.members.forEach((member, position) => {
+      const memberId = `${group.id}-M${position + 1}`;
+      db.prepare('INSERT INTO agent_group_members(id, group_id, key, agent, role, display_name, instructions, position, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)')
+        .run(memberId, group.id, member.key, member.agent, member.role, member.displayName || member.key, member.instructions, position);
+      if (member.key === draft.moderatorKey) moderatorId = memberId;
+    });
+    db.prepare('UPDATE agent_groups SET moderator_member_id = ? WHERE id = ?').run(moderatorId, group.id);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  appendEvent('group', `${group.id} updated`);
+  return requireGroup(group.id);
+}
+
+function archiveGroup(group) {
+  if (group.status === 'archived') return group;
+  db.prepare("UPDATE agent_groups SET status = 'archived', updated_at = ? WHERE id = ?").run(now(), group.id);
+  appendEvent('group', `${group.id} archived`);
+  return requireGroup(group.id);
+}
 
 function saveTask(task) {
   task.updated_at = now();
@@ -213,7 +442,10 @@ function updateRun(id, fields) { return saveRun({ ...requireRun(id), ...fields }
 function runTasks(runId) { return listTasks().filter(task => task.run_id === runId); }
 
 function broadcast(type, payload) {
-  const data = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+  const eventId = ++streamEventId;
+  const data = `id: ${eventId}\nevent: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+  streamReplay.push({ id: eventId, data });
+  if (streamReplay.length > 500) streamReplay.shift();
   for (const response of eventStreams) {
     try { response.write(data); } catch { eventStreams.delete(response); }
   }
@@ -256,16 +488,29 @@ function importLegacyState() {
 }
 
 function recoverInterruptedTasks() {
-  const interrupted = db.prepare("SELECT id FROM tasks WHERE status IN ('preparing', 'running', 'verifying', 'merging')").all();
+  const interrupted = db.prepare("SELECT id FROM tasks WHERE status IN ('preparing', 'running', 'verifying', 'reviewing', 'repairing', 'merging')").all();
   for (const row of interrupted) {
     const task = requireTask(row.id);
     updateTask(task.id, { status: 'recovery_required', process_pid: null, recovery_note: 'Daemon restarted while work was in progress.' });
+    const assignment = getTaskRoleAssignment(task.id);
+    if (assignment) {
+      updateTaskRoleAssignment(task.id, { stage: 'recovery_required' });
+      updateGroupSession(assignment.session_id, { status: 'recovery_required', recovery_note: 'Daemon restarted during the role pipeline.' });
+    }
     appendEvent('recovery', `${task.id} requires operator confirmation after daemon restart`, task.id);
   }
   const interruptedReviews = db.prepare("SELECT id, task_id FROM reviews WHERE status = 'running'").all();
   for (const review of interruptedReviews) {
     db.prepare('UPDATE reviews SET status = ?, updated_at = ? WHERE id = ?').run('pending', now(), review.id);
     appendEvent('recovery', `${review.id} reviewer process was interrupted and can be retried`, review.task_id);
+  }
+  const interruptedSessions = db.prepare("SELECT id FROM group_sessions WHERE status IN ('discussing', 'synthesizing')").all();
+  for (const session of interruptedSessions) {
+    db.prepare("UPDATE group_sessions SET status = 'recovery_required', recovery_note = ?, updated_at = ? WHERE id = ?")
+      .run('Daemon restarted while an agent turn was active.', now(), session.id);
+    db.prepare("UPDATE group_turns SET status = 'recovery_required', process_pid = NULL, finished_at = ? WHERE session_id = ? AND status = 'running'")
+      .run(now(), session.id);
+    appendEvent('recovery', `${session.id} requires operator confirmation after daemon restart`);
   }
 }
 
@@ -352,8 +597,8 @@ async function loadConfig() {
   if (!config) throw new Error('The AOD adapter config is not valid JSON.');
   return { agents: {}, defaults: {}, ...config };
 }
-function expand(value, task, prompt) {
-  return String(value).replaceAll('{{taskId}}', task.id).replaceAll('{{worktree}}', task.worktree || '').replaceAll('{{promptFile}}', join(handoffDir, `${task.id}.md`)).replaceAll('{{prompt}}', prompt);
+function expand(value, task, prompt, promptFile = join(handoffDir, `${task.id}.md`)) {
+  return String(value).replaceAll('{{taskId}}', task.id).replaceAll('{{worktree}}', task.worktree || '').replaceAll('{{promptFile}}', promptFile).replaceAll('{{prompt}}', prompt);
 }
 async function writeHandoff(task) {
   await mkdir(handoffDir, { recursive: true });
@@ -364,6 +609,262 @@ async function writeHandoff(task) {
     'Commit changes in this branch. Do not modify paths outside the ownership list. Report changed files, commit SHA, test output, and residual risks.'
   ].join('\n');
   await writeFile(join(handoffDir, `${task.id}.md`), `${handoff}\n`, 'utf8');
+}
+
+function recentGroupContext(sessionId) {
+  const messages = db.prepare('SELECT round, sender_kind, sender_member_id, phase, content FROM group_messages WHERE session_id = ? ORDER BY id ASC').all(sessionId);
+  const text = messages.map(message => `[round ${message.round} / ${message.phase} / ${message.sender_member_id || message.sender_kind}]\n${message.content}`).join('\n\n');
+  return text.slice(-48000);
+}
+
+function groupTurnPrompt(session, member, round, phase) {
+  const objectives = {
+    proposal: 'Propose a concrete implementation approach, responsibilities, risks, and acceptance criteria.',
+    critique: 'Read the proposals, challenge assumptions, identify conflicts, and recommend corrections.',
+    convergence: 'Resolve disagreements and state the task split, dependencies, ownership, and verification strategy.',
+    synthesis: 'Synthesize the discussion into the required JSON object. Return JSON only, without markdown.'
+  };
+  const roster = session.members.map(item => `- ${item.id}: ${item.displayName} (${item.agent}, ${item.role})${item.isModerator ? ' [moderator]' : ''}`).join('\n');
+  const schema = phase === 'synthesis' ? [
+    'Required JSON shape:',
+    '{"title":"...","summary":"...","decisions":["..."],"disagreements":[],"risks":["..."],"maxRepairs":2,"tasks":[{"key":"...","title":"...","description":"...","files":["path"],"dependsOn":[],"acceptance":"npm test","risk":"...","executorMemberId":"...","reviewerMemberId":"...","fixerMemberId":"..."}]}',
+    'Use exact member IDs from the roster. Tasks must be acyclic and own disjoint files.'
+  ].join('\n') : '';
+  return [
+    `Group session: ${session.id}`, `Requirement: ${session.requirement}`, `Round: ${round}/${session.max_rounds}`, `Phase: ${phase}`,
+    `You are ${member.displayName}, role ${member.role}.`, member.instructions ? `Responsibilities: ${member.instructions}` : '',
+    'Roster:', roster, '', objectives[phase], schema, '', 'Discussion so far:', recentGroupContext(session.id) || '(none)'
+  ].filter(Boolean).join('\n');
+}
+
+async function validateSessionConsensus(session, draft) {
+  const config = await loadConfig();
+  const allowed = config.security?.allowedAcceptancePrefixes || ['npm ', 'node ', 'pnpm ', 'yarn ', 'git ', 'python ', 'py '];
+  const validated = validateConsensusDraft({ ...draft, maxRepairs: session.max_repairs }, { members: session.members, maxRepairs: session.max_repairs }, allowed);
+  const sourceByKey = new Map(draft.tasks.map(task => [task.key, task]));
+  validated.tasks = validated.tasks.map(task => ({
+    ...sourceByKey.get(task.key), ...task,
+    description: String(sourceByKey.get(task.key)?.description || ''), risk: String(sourceByKey.get(task.key)?.risk || '')
+  }));
+  return validated;
+}
+
+async function acquireAgentSlot(checkCancelled) {
+  while (true) {
+    checkCancelled?.();
+    if (currentProcessCount() + pendingAgentStarts < maxConcurrency()) {
+      pendingAgentStarts += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        pendingAgentStarts -= 1;
+      };
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  }
+}
+
+async function runGroupTurn(session, member, round, phase) {
+  const checkCancelled = () => {
+    if (requireGroupSession(session.id).status === 'cancelled') throw new Error('Group session was cancelled.');
+  };
+  let releaseAgentSlot = await acquireAgentSlot(checkCancelled);
+  try {
+    const config = await loadConfig();
+    const adapter = config.agents[member.agent];
+    if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No ${member.agent} adapter is configured.`);
+    const id = `GT-${crypto.randomUUID().slice(0, 8)}`;
+    const directory = join(dirname(root), `${basename(root)}.aod-group-sessions`, session.id, id);
+    await mkdir(directory, { recursive: true });
+    const prompt = groupTurnPrompt(session, member, round, phase);
+    const promptFile = join(directory, 'prompt.md');
+    await writeFile(promptFile, `${prompt}\n`, 'utf8');
+    const timeoutMs = Math.max(1000, Number(adapter.groupTimeoutMs || config.defaults?.groupTurnTimeoutMs || adapter.timeoutMs || 600000));
+    const maxRetries = Math.max(0, Number(adapter.maxRetries ?? config.defaults?.maxRetries ?? 0));
+    db.prepare(`INSERT INTO group_turns(id, session_id, member_id, round, phase, status, prompt_hash, timeout_ms, max_retries, created_at)
+      VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`)
+      .run(id, session.id, member.id, round, phase, createHash('sha256').update(prompt).digest('hex'), timeoutMs, maxRetries, now());
+    broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'queued' });
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+      if (!releaseAgentSlot) releaseAgentSlot = await acquireAgentSlot(checkCancelled);
+      checkCancelled();
+      const pseudoTask = { id, worktree: directory };
+      const args = adapter.args.map(value => expand(value, pseudoTask, prompt, promptFile));
+      const outcome = await new Promise(resolveTurn => {
+        const child = spawn(adapter.command, args, {
+          cwd: directory, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, AOD_GROUP_SESSION_ID: session.id, AOD_GROUP_MEMBER_ID: member.id, AOD_GROUP_PHASE: phase, AOD_GROUP_ROSTER: JSON.stringify(session.members) }
+        });
+        let output = '';
+        let settled = false;
+        let timedOut = false;
+        const finish = result => { if (settled) return; settled = true; clearTimeout(timer); groupProcesses.delete(id); resolveTurn({ ...result, output }); };
+        const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+        groupProcesses.set(id, { child, timer, sessionId: session.id });
+        releaseAgentSlot();
+        releaseAgentSlot = null;
+        db.prepare("UPDATE group_turns SET status = 'running', process_pid = ?, attempts = ?, started_at = ? WHERE id = ?").run(child.pid || null, attempt, now(), id);
+        broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'running', attempt });
+        child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, pseudoTask, prompt, promptFile));
+        child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); });
+        child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); });
+        child.once('error', error => finish({ ok: false, error, code: null }));
+        child.once('close', code => finish({ ok: !timedOut && code === 0, code, error: timedOut ? new Error(`Group turn timed out after ${timeoutMs}ms.`) : null }));
+      });
+      if (outcome.ok) {
+        const output = redactSecrets(outcome.output).slice(-12000).trim();
+        db.prepare("UPDATE group_turns SET status = 'completed', output = ?, process_pid = NULL, exit_code = ?, finished_at = ? WHERE id = ?")
+          .run(output, outcome.code, now(), id);
+        appendGroupMessage(session.id, { turnId: id, round, senderKind: 'member', senderMemberId: member.id, phase, content: output });
+        broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'completed' });
+        return output;
+      }
+      lastError = outcome.error || new Error(`Group turn exited with ${outcome.code}.`);
+    }
+    db.prepare("UPDATE group_turns SET status = 'recovery_required', output = ?, process_pid = NULL, finished_at = ? WHERE id = ?")
+      .run(redactSecrets(lastError?.message || 'Group turn failed.'), now(), id);
+    broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'recovery_required' });
+    throw lastError || new Error('Group turn failed.');
+  } finally {
+    releaseAgentSlot?.();
+  }
+}
+
+async function runGroupDiscussion(sessionId) {
+  let session = requireGroupSession(sessionId);
+  try {
+    const phases = ['proposal', 'critique', 'convergence'];
+    for (let round = session.current_round + 1; round <= session.max_rounds; round += 1) {
+      session = requireGroupSession(sessionId);
+      await Promise.all(session.members.map(member => runGroupTurn(session, member, round, phases[Math.min(round - 1, phases.length - 1)])));
+      session = updateGroupSession(sessionId, { current_round: round });
+      if (session.pause_requested) {
+        updateGroupSession(sessionId, { status: 'paused', pause_requested: false });
+        return;
+      }
+    }
+    session = updateGroupSession(sessionId, { status: 'synthesizing' });
+    const moderator = session.members.find(member => member.isModerator);
+    if (!moderator) throw new Error('The session snapshot has no moderator.');
+    const output = await runGroupTurn(session, moderator, session.max_rounds, 'synthesis');
+    const draft = extractJson(output);
+    if (!draft) throw new Error('Moderator did not return a valid consensus DAG.');
+    const consensus = await validateSessionConsensus(session, draft);
+    session = requireGroupSession(sessionId);
+    if (session.pause_requested) {
+      updateGroupSession(sessionId, { status: 'paused', consensus, pause_requested: false, finished_at: now(), recovery_note: null });
+    } else {
+      updateGroupSession(sessionId, { status: 'awaiting_confirmation', consensus, finished_at: now(), recovery_note: null });
+    }
+  } catch (error) {
+    if (getGroupSession(sessionId)?.status !== 'cancelled') updateGroupSession(sessionId, { status: 'recovery_required', recovery_note: error instanceof Error ? error.message : 'Group discussion failed.' });
+  }
+}
+
+function startGroupDiscussion(session) {
+  if (session.status === 'paused' && session.current_round === session.max_rounds && session.consensus) {
+    return updateGroupSession(session.id, { status: 'awaiting_confirmation', pause_requested: false, recovery_note: null });
+  }
+  if (!['draft', 'paused', 'recovery_required'].includes(session.status)) throw new Error('This group session cannot start or resume from its current status.');
+  const next = updateGroupSession(session.id, { status: 'discussing', pause_requested: false, recovery_note: null });
+  runGroupDiscussion(session.id).catch(() => {});
+  return next;
+}
+
+function resumeGroupSession(session) {
+  if (!session.run_id) {
+    if (!['paused', 'recovery_required'].includes(session.status)) throw new Error('Only a paused or interrupted group discussion can be resumed.');
+    return startGroupDiscussion(session);
+  }
+  if (session.status !== 'recovery_required') throw new Error('Only an interrupted group execution can be resumed.');
+
+  for (const assignment of session.assignments.filter(item => item.stage === 'recovery_required')) {
+    const task = requireTask(assignment.task_id);
+    if (assignment.review?.decision === 'changes_requested' && assignment.repair_count < assignment.max_repairs) {
+      updateTaskRoleAssignment(task.id, { stage: 'repairing' });
+      updateTask(task.id, { status: 'repairing', recovery_note: assignment.review.summary || task.recovery_note });
+    } else if (task.verified_commit && task.verified_commit === assignment.review_commit) {
+      updateTaskRoleAssignment(task.id, { stage: 'reviewing' });
+      updateTask(task.id, { status: 'reviewing', recovery_note: null });
+    } else {
+      updateTaskRoleAssignment(task.id, { stage: 'pending' });
+      updateTask(task.id, { status: task.worktree ? 'ready' : 'draft', process_pid: null, recovery_note: null });
+    }
+  }
+
+  const resumed = updateGroupSession(session.id, { status: 'executing', pause_requested: false, recovery_note: null });
+  scheduleGroupAdvance();
+  return resumed;
+}
+
+function cancelGroupSession(session) {
+  if (['completed', 'cancelled', 'failed'].includes(session.status)) {
+    throw new Error(`A ${session.status} group session cannot be cancelled.`);
+  }
+  const assignments = db.prepare('SELECT * FROM task_role_assignments WHERE session_id = ?').all(session.id);
+  const taskIds = new Set(assignments.map(assignment => assignment.task_id));
+  const finishedAt = now();
+  const stop = entry => {
+    clearTimeout(entry.timer);
+    try { entry.child.kill(); } catch {}
+  };
+
+  updateGroupSession(session.id, { status: 'cancelled', pause_requested: false, recovery_note: null, finished_at: finishedAt });
+  for (const assignment of assignments) {
+    const task = getTask(assignment.task_id);
+    if (task && !['merged', 'cancelled', 'failed'].includes(task.status)) {
+      updateTask(task.id, { status: 'cancelled', process_pid: null, finished_at: finishedAt, recovery_note: null });
+    }
+    updateTaskRoleAssignment(assignment.task_id, { stage: 'failed' });
+  }
+  for (const entry of groupProcesses.values()) if (entry.sessionId === session.id) stop(entry);
+  for (const entry of roleProcesses.values()) if (entry.sessionId === session.id) stop(entry);
+  for (const taskId of taskIds) {
+    const entry = taskProcesses.get(taskId);
+    if (entry) stop(entry);
+  }
+  appendEvent('group_session', `${session.id} cancelled`);
+  return requireGroupSession(session.id);
+}
+
+async function recoverGroupTurn(turn, payload) {
+  if (!['retry', 'skip', 'replace'].includes(payload.action)) throw new Error('Recovery action must be retry, skip, or replace.');
+  const session = requireGroupSession(turn.session_id);
+  if (session.status !== 'recovery_required' || turn.status !== 'recovery_required') throw new Error('Only an interrupted group turn can be recovered.');
+  if ([...groupProcesses.values()].some(entry => entry.sessionId === session.id)) throw new Error('Wait for active group turns to stop before recovering this session.');
+  let member = session.members.find(item => item.id === turn.member_id);
+  if (payload.action === 'replace') {
+    member = session.members.find(item => item.id === payload.replacementMemberId);
+    if (!member) throw new Error('replacementMemberId must identify a session member.');
+  }
+  if (payload.action === 'skip' && turn.phase === 'synthesis') throw new Error('The moderator synthesis turn cannot be skipped.');
+
+  db.prepare("UPDATE group_turns SET status = ?, finished_at = ? WHERE id = ?").run(payload.action === 'skip' ? 'skipped' : 'superseded', now(), turn.id);
+  if (payload.action === 'skip') {
+    appendGroupMessage(session.id, { round: turn.round, senderKind: 'system', phase: 'recovery', content: `${member?.displayName || turn.member_id} was skipped by the operator.` });
+  } else {
+    const output = await runGroupTurn(session, member, turn.round, turn.phase);
+    if (turn.phase === 'synthesis') {
+      const draft = extractJson(output);
+      if (!draft) throw new Error('Recovered moderator turn did not return a valid consensus DAG.');
+      const consensus = await validateSessionConsensus(session, draft);
+      return updateGroupSession(session.id, { status: 'awaiting_confirmation', consensus, recovery_note: null, finished_at: now() });
+    }
+  }
+
+  const completed = new Set(db.prepare("SELECT member_id FROM group_turns WHERE session_id = ? AND round = ? AND phase = ? AND status IN ('completed', 'skipped')")
+    .all(session.id, turn.round, turn.phase).map(item => item.member_id));
+  if (payload.action === 'replace') completed.add(turn.member_id);
+  if (session.members.every(item => completed.has(item.id))) {
+    updateGroupSession(session.id, { status: 'discussing', current_round: Math.max(session.current_round, turn.round), recovery_note: null });
+    runGroupDiscussion(session.id).catch(() => {});
+  } else {
+    updateGroupSession(session.id, { status: 'recovery_required', recovery_note: 'Additional member turns in this round still require recovery.' });
+  }
+  return requireGroupSession(session.id);
 }
 
 async function prepareTask(task, source = 'manual') {
@@ -392,34 +893,41 @@ async function prepareTask(task, source = 'manual') {
   }
 }
 
-function currentProcessCount() { return taskProcesses.size; }
+function currentProcessCount() { return taskProcesses.size + reviewProcesses.size + groupProcesses.size + roleProcesses.size + plannerProcesses.size; }
 async function startTask(task, source = 'manual') {
   if (task.status !== 'ready') throw new Error('Only prepared tasks can start an agent process.');
   if (!task.worktree || !(await exists(task.worktree))) throw new Error('This task has no prepared worktree.');
   if (task.locked) throw new Error('This task is locked for conflict review.');
   if (taskProcesses.has(task.id)) throw new Error('An agent process is already attached to this task.');
-  if (currentProcessCount() >= maxConcurrency()) throw new Error(`Concurrency limit of ${maxConcurrency()} is reached.`);
-  const config = await loadConfig();
-  const adapter = config.agents[task.agent];
-  if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No ${task.agent} adapter is configured.`);
-  const promptPath = join(handoffDir, `${task.id}.md`);
-  if (!(await exists(promptPath))) throw new Error('The task handoff file is missing. Prepare the worktree again.');
-  const prompt = await readFile(promptPath, 'utf8');
-  const args = adapter.args.map(value => expand(value, task, prompt));
-  const timeoutMs = Math.max(1000, Number(adapter.timeoutMs || config.defaults.agentTimeoutMs || task.timeout_ms));
-  const maxRetries = Math.max(0, Number(adapter.maxRetries ?? config.defaults.maxRetries ?? task.max_retries));
-  task = updateTask(task.id, { status: 'running', output: '', process_pid: null, attempts: task.attempts + 1, max_retries: maxRetries, timeout_ms: timeoutMs, started_at: now(), finished_at: null, recovery_note: null });
-  appendEvent('agent', `${task.id} started ${task.agent} (${source})`, task.id);
-  const child = spawn(adapter.command, args, { cwd: task.worktree, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: task.worktree } });
-  const timer = setTimeout(() => { const entry = taskProcesses.get(task.id); if (entry) entry.timedOut = true; child.kill(); }, timeoutMs);
-  taskProcesses.set(task.id, { child, timer, timedOut: false });
-  updateTask(task.id, { process_pid: child.pid || null });
-  child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, task, prompt));
-  child.stdout.on('data', data => { try { appendOutput(task.id, data.toString(), 'stdout'); } catch {} });
-  child.stderr.on('data', data => { try { appendOutput(task.id, data.toString(), 'stderr'); } catch {} });
-  child.once('error', error => finishTaskProcess(task.id, child, { ok: false, error, code: null }).catch(() => {}));
-  child.once('close', code => finishTaskProcess(task.id, child, { ok: code === 0, code }).catch(() => {}));
-  return getTask(task.id);
+  const releaseAgentSlot = await acquireAgentSlot();
+  try {
+    const config = await loadConfig();
+    const adapter = config.agents[task.agent];
+    if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No ${task.agent} adapter is configured.`);
+    const promptPath = join(handoffDir, `${task.id}.md`);
+    if (!(await exists(promptPath))) throw new Error('The task handoff file is missing. Prepare the worktree again.');
+    const prompt = await readFile(promptPath, 'utf8');
+    const args = adapter.args.map(value => expand(value, task, prompt));
+    const timeoutMs = Math.max(1000, Number(adapter.timeoutMs || config.defaults.agentTimeoutMs || task.timeout_ms));
+    const maxRetries = Math.max(0, Number(adapter.maxRetries ?? config.defaults.maxRetries ?? task.max_retries));
+    const roleAssignment = getTaskRoleAssignment(task.id);
+    if (roleAssignment) updateTaskRoleAssignment(task.id, { stage: 'executing' });
+    task = updateTask(task.id, { status: 'running', output: '', process_pid: null, attempts: task.attempts + 1, max_retries: maxRetries, timeout_ms: timeoutMs, started_at: now(), finished_at: null, recovery_note: null });
+    appendEvent('agent', `${task.id} started ${task.agent} (${source})`, task.id);
+    const child = spawn(adapter.command, args, { cwd: task.worktree, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: task.worktree, AOD_TASK_STAGE: roleAssignment ? 'execute' : 'task', AOD_TASK_FILES: JSON.stringify(task.files) } });
+    const timer = setTimeout(() => { const entry = taskProcesses.get(task.id); if (entry) entry.timedOut = true; child.kill(); }, timeoutMs);
+    taskProcesses.set(task.id, { child, timer, timedOut: false });
+    releaseAgentSlot();
+    updateTask(task.id, { process_pid: child.pid || null });
+    child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, task, prompt));
+    child.stdout.on('data', data => { try { appendOutput(task.id, data.toString(), 'stdout'); } catch {} });
+    child.stderr.on('data', data => { try { appendOutput(task.id, data.toString(), 'stderr'); } catch {} });
+    child.once('error', error => finishTaskProcess(task.id, child, { ok: false, error, code: null }).catch(() => {}));
+    child.once('close', code => finishTaskProcess(task.id, child, { ok: code === 0, code }).catch(() => {}));
+    return getTask(task.id);
+  } finally {
+    releaseAgentSlot();
+  }
 }
 
 async function finishTaskProcess(id, child, outcome) {
@@ -428,11 +936,18 @@ async function finishTaskProcess(id, child, outcome) {
   clearTimeout(entry.timer);
   taskProcesses.delete(id);
   const task = requireTask(id);
+  const roleAssignment = getTaskRoleAssignment(id);
   if (task.status !== 'running') return;
   const errorText = entry.timedOut ? `Agent timed out after ${task.timeout_ms}ms.` : outcome.error?.message;
   if (outcome.ok) {
     updateTask(id, { status: 'verifying', process_pid: null, last_exit_code: outcome.code, finished_at: now() });
+    if (getTaskRoleAssignment(id)) updateTaskRoleAssignment(id, { stage: 'verifying' });
     appendEvent('agent', `${id} exited successfully; awaiting verification`, id);
+  } else if (roleAssignment) {
+    updateTask(id, { status: 'recovery_required', process_pid: null, last_exit_code: outcome.code, finished_at: now(), recovery_note: errorText || 'Group executor exited unsuccessfully.' });
+    updateTaskRoleAssignment(id, { stage: 'recovery_required' });
+    updateGroupSession(roleAssignment.session_id, { status: 'recovery_required', recovery_note: errorText || 'Group executor failed.' });
+    appendEvent('agent', `${id} group executor requires recovery`, id);
   } else if (currentMode() === 'auto' && task.attempts <= task.max_retries) {
     updateTask(id, { status: 'ready', process_pid: null, last_exit_code: outcome.code, recovery_note: errorText || 'Agent exited unsuccessfully.' });
     appendEvent('retry', `${id} will retry automatically (${task.attempts}/${task.max_retries})`, id);
@@ -441,6 +956,7 @@ async function finishTaskProcess(id, child, outcome) {
     appendEvent('agent', `${id} agent process failed`, id);
   }
   scheduleAdvance();
+  scheduleGroupAdvance();
 }
 
 async function verifyTask(task, source = 'manual') {
@@ -450,12 +966,28 @@ async function verifyTask(task, source = 'manual') {
   const commit = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
   try {
     const result = await runShell(task.acceptance, task.worktree, task.timeout_ms);
-    updateTask(task.id, { status: 'merge_ready', verified_commit: commit, verification: { at: now(), command: task.acceptance, output: redactSecrets(`${result.stdout}${result.stderr}`).slice(-8000), commit }, recovery_note: null });
+    const roleAssignment = getTaskRoleAssignment(task.id);
+    updateTask(task.id, { status: roleAssignment ? 'reviewing' : 'merge_ready', verified_commit: commit, verification: { at: now(), command: task.acceptance, output: redactSecrets(`${result.stdout}${result.stderr}`).slice(-8000), commit }, recovery_note: null });
+    if (roleAssignment) updateTaskRoleAssignment(task.id, { stage: 'reviewing', review_commit: commit });
     appendEvent('verify', `${task.id} acceptance check passed (${source})`, task.id);
+    if (roleAssignment) scheduleGroupAdvance();
     return getTask(task.id);
   } catch (error) {
-    updateTask(task.id, { status: 'failed', verification: { at: now(), command: task.acceptance, output: redactSecrets(error instanceof Error ? error.message : 'Verification failed.'), commit }, recovery_note: 'Acceptance failed.' });
+    const roleAssignment = getTaskRoleAssignment(task.id);
+    const verification = { at: now(), command: task.acceptance, output: redactSecrets(error instanceof Error ? error.message : 'Verification failed.'), commit };
+    if (roleAssignment?.fixer_member_id && roleAssignment.repair_count < roleAssignment.max_repairs) {
+      updateTaskRoleAssignment(task.id, { stage: 'repairing', review: { decision: 'changes_requested', summary: 'Acceptance failed.', findings: [verification.output] } });
+      updateTask(task.id, { status: 'repairing', verification, recovery_note: 'Acceptance failed; repair requested.' });
+      scheduleGroupAdvance();
+    } else if (roleAssignment) {
+      updateTaskRoleAssignment(task.id, { stage: 'recovery_required', review: { decision: 'changes_requested', summary: 'Acceptance failed.', findings: [verification.output] } });
+      updateTask(task.id, { status: 'recovery_required', verification, recovery_note: 'Acceptance failed and repair is unavailable.' });
+      updateGroupSession(roleAssignment.session_id, { status: 'recovery_required', recovery_note: 'Task acceptance failed.' });
+    } else {
+      updateTask(task.id, { status: 'failed', verification, recovery_note: 'Acceptance failed.' });
+    }
     appendEvent('verify', `${task.id} acceptance check failed`, task.id);
+    if (roleAssignment) return getTask(task.id);
     throw error;
   }
 }
@@ -494,9 +1026,12 @@ async function mergeTask(task, source = 'manual') {
     appendEvent('merge', `${task.id} merged into ${branch} (${source})`, task.id);
     if (run && runTasks(run.id).every(item => item.id === task.id || item.status === 'merged')) {
       updateRun(run.id, { status: 'ready_to_publish' });
+      const groupSession = db.prepare('SELECT id FROM group_sessions WHERE run_id = ?').get(run.id);
+      if (groupSession) updateGroupSession(groupSession.id, { status: 'completed', finished_at: now() });
       appendEvent('run', `${run.id} is ready to publish`, null, run.id);
     }
-    await scheduleAdvance();
+    scheduleAdvance();
+    await scheduleGroupAdvance();
     return getTask(task.id);
   } catch (error) {
     if (await createConflictReview(task, error instanceof Error ? error : new Error('Merge failed.'), cwd)) return getTask(task.id);
@@ -511,34 +1046,66 @@ async function startReview(task) {
   const review = listReviews().find(item => item.task_id === task.id && ['pending', 'failed'].includes(item.status));
   if (!review) throw new Error('No pending conflict review exists for this task.');
   if (reviewProcesses.has(review.id)) throw new Error('Reviewer agent is already running.');
-  const config = await loadConfig();
-  const agent = config.reviewerAgent || review.reviewer_agent;
-  const adapter = config.agents[agent];
-  if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No reviewer adapter is configured for ${agent}.`);
-  const prompt = [
-    'You are a read-only merge conflict reviewer. Do not modify files or run write commands.',
-    `Task: ${task.id} ${task.title}`, `Worktree: ${task.worktree}`, 'Conflicted files:', ...review.conflictFiles.map(file => `- ${file}`),
-    '', 'Return a concise rationale and one optional unified diff patch in a ```diff code fence. The operator will review and apply it manually.', '', review.conflict_diff
-  ].join('\n');
-  const child = spawn(adapter.command, adapter.args.map(value => expand(value, task, prompt)), { cwd: task.worktree, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  let output = '';
-  const timeoutMs = Number(adapter.timeoutMs || config.defaults?.reviewTimeoutMs || 600000);
-  const timer = setTimeout(() => child.kill(), timeoutMs);
-  reviewProcesses.set(review.id, { child, timer });
-  db.prepare('UPDATE reviews SET status = ?, reviewer_agent = ?, updated_at = ? WHERE id = ?').run('running', agent, now(), review.id);
-  appendEvent('review', `${review.id} reviewer agent started`, task.id);
-  child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, task, prompt));
-  child.stdout.on('data', data => { output = `${output}${data}`.slice(-24000); });
-  child.stderr.on('data', data => { output = `${output}${data}`.slice(-24000); });
-  const finish = (status) => {
-    const active = reviewProcesses.get(review.id); if (!active || active.child !== child) return;
-    clearTimeout(active.timer); reviewProcesses.delete(review.id);
-    db.prepare('UPDATE reviews SET status = ?, suggestion = ?, updated_at = ? WHERE id = ?').run(status, output, now(), review.id);
-    appendEvent('review', `${review.id} reviewer ${status}`, task.id);
-  };
-  child.once('error', () => finish('failed'));
-  child.once('close', code => finish(code === 0 ? 'suggested' : 'failed'));
-  return reviewFromRow(db.prepare('SELECT * FROM reviews WHERE id = ?').get(review.id));
+  const releaseAgentSlot = await acquireAgentSlot();
+  let area = null;
+  try {
+    const config = await loadConfig();
+    const agent = config.reviewerAgent || review.reviewer_agent;
+    const adapter = config.agents[agent];
+    if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.reviewArgs)) throw new Error(`No read-only reviewer adapter is configured for ${agent}.`);
+    area = join(dirname(root), `${basename(root)}.aod-conflict-reviews`, review.id);
+    if (await exists(area)) {
+      try { await git(['worktree', 'remove', '--force', area]); } catch { await rm(area, { recursive: true, force: true }); }
+    }
+    await mkdir(dirname(area), { recursive: true });
+    const reviewCommit = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
+    await git(['worktree', 'add', '--detach', area, reviewCommit]);
+    const reviewTask = { ...task, worktree: area };
+    const prompt = [
+      'You are a read-only merge conflict reviewer. Do not modify files or run write commands.',
+      `Task: ${task.id} ${task.title}`, `Worktree: ${area}`, 'Conflicted files:', ...review.conflictFiles.map(file => `- ${file}`),
+      '', 'Return a concise rationale and one optional unified diff patch in a ```diff code fence. The operator will review and apply it manually.', '', review.conflict_diff
+    ].join('\n');
+    const child = spawn(adapter.command, adapter.reviewArgs.map(value => expand(value, reviewTask, prompt)), {
+      cwd: area, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: area, AOD_TASK_STAGE: 'conflict_review', AOD_TASK_FILES: JSON.stringify(task.files) }
+    });
+    let output = '';
+    const timeoutMs = Number(adapter.timeoutMs || config.defaults?.reviewTimeoutMs || 600000);
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    reviewProcesses.set(review.id, { child, timer, area, finishing: false });
+    releaseAgentSlot();
+    db.prepare('UPDATE reviews SET status = ?, reviewer_agent = ?, updated_at = ? WHERE id = ?').run('running', agent, now(), review.id);
+    appendEvent('review', `${review.id} reviewer agent started`, task.id);
+    child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, reviewTask, prompt));
+    child.stdout.on('data', data => { output = `${output}${data}`.slice(-24000); });
+    child.stderr.on('data', data => { output = `${output}${data}`.slice(-24000); });
+    const finish = async candidateStatus => {
+      const active = reviewProcesses.get(review.id);
+      if (!active || active.child !== child || active.finishing) return;
+      active.finishing = true;
+      clearTimeout(active.timer);
+      let status = candidateStatus;
+      if (status === 'suggested') {
+        try {
+          const [head, changes] = await Promise.all([
+            git(['rev-parse', 'HEAD'], area),
+            git(['status', '--porcelain', '--untracked-files=all'], area)
+          ]);
+          if (head.stdout.trim() !== reviewCommit || changes.stdout.trim()) status = 'failed';
+        } catch { status = 'failed'; }
+      }
+      try { await git(['worktree', 'remove', '--force', area]); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
+      reviewProcesses.delete(review.id);
+      db.prepare('UPDATE reviews SET status = ?, suggestion = ?, updated_at = ? WHERE id = ?').run(status, output, now(), review.id);
+      appendEvent('review', `${review.id} reviewer ${status}`, task.id);
+    };
+    child.once('error', () => { finish('failed').catch(() => {}); });
+    child.once('close', code => { finish(code === 0 ? 'suggested' : 'failed').catch(() => {}); });
+    return reviewFromRow(db.prepare('SELECT * FROM reviews WHERE id = ?').get(review.id));
+  } finally {
+    releaseAgentSlot();
+  }
 }
 
 async function approveReview(review, patch) {
@@ -546,6 +1113,7 @@ async function approveReview(review, patch) {
   if (typeof patch !== 'string' || !patch.trim()) throw new Error('Paste the reviewed unified diff before approving it.');
   const task = requireTask(review.task_id);
   if (task.status !== 'conflict_review' || !task.worktree) throw new Error('Task is not available for conflict resolution.');
+  if (!(await gitClean(task.worktree))) throw new Error('The task worktree must be clean before an approved conflict patch can be applied.');
   const patchPath = join(aodDir, `review-${review.id}.patch`);
   await writeFile(patchPath, patch, 'utf8');
   try {
@@ -568,17 +1136,193 @@ function scheduleAdvance() {
     const mode = currentMode();
     if (mode === 'manual') return;
     for (const task of listTasks()) {
+      if (getTaskRoleAssignment(task.id)) continue;
       try {
         if (task.status === 'draft' && dependenciesComplete(task)) await prepareTask(task, mode);
         else if (task.status === 'ready' && mode === 'auto') await startTask(task, mode);
         else if (task.status === 'verifying') await verifyTask(task, mode);
-        else if (task.status === 'merge_ready' && mode === 'auto') await mergeTask(task, mode);
       } catch (error) {
         appendEvent('automation', `${task.id}: ${error instanceof Error ? error.message : 'automatic step failed'}`, task.id);
       }
     }
   });
   return advanceQueue;
+}
+
+let groupAdvanceQueue = Promise.resolve();
+
+async function runRoleAdapter(task, member, stage, prompt, cwd) {
+  const session = requireGroupSession(getTaskRoleAssignment(task.id).session_id);
+  const checkCancelled = () => {
+    if (requireGroupSession(session.id).status === 'cancelled') throw new Error('Group session was cancelled.');
+  };
+  const releaseAgentSlot = await acquireAgentSlot(checkCancelled);
+  try {
+    const config = await loadConfig();
+    const adapter = config.agents[member.agent];
+    if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No ${member.agent} adapter is configured.`);
+    const argumentTemplate = stage === 'review' ? adapter.reviewArgs : adapter.args;
+    if (!Array.isArray(argumentTemplate)) throw new Error('Reviewer adapters require a dedicated reviewArgs array.');
+    const key = `${task.id}:${stage}`;
+    const promptFile = join(cwd, `.aod-${stage}-prompt.md`);
+    await writeFile(promptFile, `${prompt}\n`, 'utf8');
+    checkCancelled();
+    const invocationTask = { ...task, worktree: cwd };
+    const args = argumentTemplate.map(value => expand(value, invocationTask, prompt, promptFile));
+    const timeoutMs = Math.max(1000, Number(adapter.roleTimeoutMs || config.defaults?.reviewTimeoutMs || adapter.timeoutMs || 600000));
+    return await new Promise((resolveRole, rejectRole) => {
+      const child = spawn(adapter.command, args, {
+        cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: cwd, AOD_TASK_STAGE: stage, AOD_TASK_FILES: JSON.stringify(task.files), AOD_GROUP_SESSION_ID: session.id, AOD_GROUP_MEMBER_ID: member.id }
+      });
+      let output = '';
+      let settled = false;
+      let timedOut = false;
+      const finish = (error, code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        roleProcesses.delete(key);
+        try { rm(promptFile, { force: true }); } catch {}
+        if (getGroupSession(session.id)?.status === 'cancelled') {
+          rejectRole(new Error('Group session was cancelled.'));
+          return;
+        }
+        if (error || timedOut || code !== 0) rejectRole(error || new Error(timedOut ? `${stage} timed out after ${timeoutMs}ms.` : `${stage} exited with ${code}.`));
+        else resolveRole(redactSecrets(output).slice(-12000).trim());
+      };
+      const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+      roleProcesses.set(key, { child, timer, sessionId: session.id, taskId: task.id, stage });
+      releaseAgentSlot();
+      child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, invocationTask, prompt, promptFile));
+      child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); });
+      child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); });
+      child.once('error', error => finish(error, null));
+      child.once('close', code => finish(null, code));
+    });
+  } finally {
+    releaseAgentSlot();
+  }
+}
+
+async function inspectGroupTask(task) {
+  const assignment = getTaskRoleAssignment(task.id);
+  if (!assignment || task.status !== 'reviewing') return task;
+  if (task.verified_commit !== assignment.review_commit) throw new Error('Task verification commit no longer matches the requested review commit.');
+  const session = requireGroupSession(assignment.session_id);
+  const reviewer = session.members.find(member => member.id === assignment.reviewer_member_id);
+  if (!reviewer) throw new Error('Assigned reviewer is missing from the session snapshot.');
+  const area = join(dirname(root), `${basename(root)}.aod-role-reviews`, task.id);
+  if (await exists(area)) {
+    try { await git(['worktree', 'remove', '--force', area]); } catch { await rm(area, { recursive: true, force: true }); }
+  }
+  await mkdir(dirname(area), { recursive: true });
+  await git(['worktree', 'add', '--detach', area, task.verified_commit]);
+  try {
+    const diff = (await git(['diff', '--stat', `${task.base_commit}..${task.verified_commit}`], area)).stdout;
+    const prompt = [
+      `Review task ${task.id}: ${task.title}`, `Commit: ${task.verified_commit}`, `Acceptance: ${task.acceptance}`,
+      'Inspect this detached worktree. Do not modify the task branch.',
+      'Return JSON only: {"decision":"pass|changes_requested","summary":"...","findings":["..."]}', '', diff
+    ].join('\n');
+    const output = await runRoleAdapter(task, reviewer, 'review', prompt, area);
+    if (getGroupSession(session.id)?.status === 'cancelled') return getTask(task.id);
+    await rm(join(area, '.aod-review-prompt.md'), { force: true });
+    const [reviewedCommit, reviewerChanges] = await Promise.all([
+      git(['rev-parse', 'HEAD'], area),
+      git(['status', '--porcelain', '--untracked-files=all'], area)
+    ]);
+    if (reviewedCommit.stdout.trim() !== task.verified_commit || reviewerChanges.stdout.trim()) {
+      throw new Error('Reviewer modified the detached inspection worktree. Only a structured decision is allowed.');
+    }
+    const review = extractJson(output);
+    if (!review || !['pass', 'changes_requested'].includes(review.decision)) throw new Error('Reviewer did not return a valid decision.');
+    if (review.decision === 'pass') {
+      updateTaskRoleAssignment(task.id, { stage: 'passed', review });
+      updateTask(task.id, { status: 'merge_ready', recovery_note: null });
+      appendEvent('task_role', `${task.id} passed group review`, task.id);
+      const assignments = db.prepare('SELECT stage FROM task_role_assignments WHERE session_id = ?').all(session.id);
+      if (assignments.length && assignments.every(item => item.stage === 'passed')) updateGroupSession(session.id, { status: 'awaiting_merge' });
+    } else if (assignment.fixer_member_id && assignment.repair_count < assignment.max_repairs) {
+      updateTaskRoleAssignment(task.id, { stage: 'repairing', review });
+      updateTask(task.id, { status: 'repairing', recovery_note: review.summary || 'Reviewer requested changes.' });
+    } else {
+      updateTaskRoleAssignment(task.id, { stage: 'recovery_required', review });
+      updateTask(task.id, { status: 'recovery_required', recovery_note: 'Review changes requested and repair budget is exhausted.' });
+      updateGroupSession(session.id, { status: 'recovery_required', recovery_note: 'Review changes requested and repair budget is exhausted.' });
+    }
+    return getTask(task.id);
+  } finally {
+    try { await git(['worktree', 'remove', '--force', area]); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
+  }
+}
+
+async function repairGroupTask(task) {
+  const assignment = getTaskRoleAssignment(task.id);
+  if (!assignment || task.status !== 'repairing') return task;
+  if (!assignment.fixer_member_id || assignment.repair_count >= assignment.max_repairs) {
+    updateTaskRoleAssignment(task.id, { stage: 'recovery_required' });
+    const recovered = updateTask(task.id, { status: 'recovery_required', recovery_note: 'Repair budget is exhausted.' });
+    updateGroupSession(assignment.session_id, { status: 'recovery_required', recovery_note: 'Repair budget is exhausted.' });
+    return recovered;
+  }
+  const session = requireGroupSession(assignment.session_id);
+  const fixer = session.members.find(member => member.id === assignment.fixer_member_id);
+  if (!fixer) throw new Error('Assigned fixer is missing from the session snapshot.');
+  const before = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
+  const prompt = [
+    `Repair task ${task.id}: ${task.title}`, `Worktree: ${task.worktree}`,
+    'Apply the smallest fix for the reviewer findings, run focused checks, and commit the changes.',
+    'Do not modify files outside the owned paths.', '', JSON.stringify(assignment.review || {}, null, 2)
+  ].join('\n');
+  try {
+    await runRoleAdapter(task, fixer, 'repair', prompt, task.worktree);
+    if (getGroupSession(session.id)?.status === 'cancelled') return getTask(task.id);
+    const after = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
+    if (after === before) throw new Error('Fixer completed without creating a new commit.');
+    updateTaskRoleAssignment(task.id, { stage: 'verifying', repair_count: assignment.repair_count + 1, review_commit: null });
+    updateTask(task.id, { status: 'verifying', verified_commit: null, verification: null, recovery_note: null });
+    appendEvent('task_role', `${task.id} repair ${assignment.repair_count + 1}/${assignment.max_repairs} committed`, task.id);
+    return getTask(task.id);
+  } catch (error) {
+    if (getGroupSession(session.id)?.status !== 'cancelled') {
+      updateTaskRoleAssignment(task.id, { stage: 'recovery_required' });
+      updateTask(task.id, { status: 'recovery_required', recovery_note: error instanceof Error ? error.message : 'Repair failed.' });
+    }
+    throw error;
+  }
+}
+
+function scheduleGroupAdvance() {
+  groupAdvanceQueue = groupAdvanceQueue.catch(() => {}).then(async () => {
+    const assignments = db.prepare("SELECT * FROM task_role_assignments WHERE stage NOT IN ('passed', 'recovery_required', 'failed') ORDER BY task_id ASC").all();
+    for (const assignment of assignments) {
+      const session = requireGroupSession(assignment.session_id);
+      if (!['executing', 'awaiting_merge'].includes(session.status)) continue;
+      try {
+        for (let step = 0; step < 6; step += 1) {
+          const task = requireTask(assignment.task_id);
+          if (task.status === 'draft' && dependenciesComplete(task)) { await prepareTask(task, 'group'); continue; }
+          if (task.status === 'ready') { await startTask(task, 'group'); break; }
+          if (task.status === 'verifying') { await verifyTask(task, 'group'); continue; }
+          if (task.status === 'reviewing' && !roleProcesses.has(`${task.id}:review`)) { await inspectGroupTask(task); continue; }
+          if (task.status === 'repairing' && !roleProcesses.has(`${task.id}:repair`)) { await repairGroupTask(task); continue; }
+          break;
+        }
+      } catch (error) {
+        const session = getGroupSession(assignment.session_id);
+        if (session?.status === 'cancelled') continue;
+        const message = error instanceof Error ? error.message : 'Role pipeline failed.';
+        const current = getTaskRoleAssignment(assignment.task_id);
+        if (current && current.stage !== 'passed') updateTaskRoleAssignment(assignment.task_id, { stage: 'recovery_required' });
+        const task = getTask(assignment.task_id);
+        if (task && !['merged', 'cancelled', 'merge_ready'].includes(task.status)) updateTask(task.id, { status: 'recovery_required', recovery_note: message, process_pid: null });
+        updateGroupSession(assignment.session_id, { status: 'recovery_required', recovery_note: message });
+        appendEvent('task_role', `${assignment.task_id}: ${message}`, assignment.task_id);
+      }
+    }
+  });
+  return groupAdvanceQueue;
 }
 
 function nextTaskId() {
@@ -593,6 +1337,7 @@ async function acceptanceAllowed(command, required = false) {
   }
   const config = await loadConfig();
   const allowed = config.security?.allowedAcceptancePrefixes || ['npm ', 'node ', 'pnpm ', 'yarn ', 'git ', 'python ', 'py '];
+  if (/[;&|<>`\r\n]/.test(command) || command.includes('$(')) throw new Error(`Acceptance command contains a shell control operator: ${command}`);
   if (!allowed.some(prefix => command.trim().startsWith(prefix))) throw new Error(`Acceptance command is not allowed: ${command}`);
   return command.trim();
 }
@@ -636,16 +1381,38 @@ async function planWithCodex(requirement, planner = 'codex') {
   ].join('\n');
   const args = adapter.args.map(value => String(value).replaceAll('{{prompt}}', prompt).replaceAll('{{worktree}}', root).replaceAll('{{taskId}}', 'planner').replaceAll('{{promptFile}}', ''));
   const timeoutMs = Number(adapter.timeoutMs || config.defaults?.plannerTimeoutMs || 600000);
-  const result = await new Promise((resolvePlan, rejectPlan) => {
-    const child = spawn(adapter.command, args, { cwd: root, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let output = '';
-    const timer = setTimeout(() => { child.kill(); rejectPlan(new Error(`Planner timed out after ${timeoutMs}ms.`)); }, timeoutMs);
-    child.stdout.on('data', data => { output += data; });
-    child.stderr.on('data', data => { output += data; });
-    child.stdin.end(adapter.stdin === undefined ? undefined : String(adapter.stdin).replaceAll('{{prompt}}', prompt));
-    child.on('error', error => { clearTimeout(timer); rejectPlan(error); });
-    child.on('close', code => { clearTimeout(timer); code === 0 ? resolvePlan(output) : rejectPlan(new Error(output.trim() || `Planner exited with ${code}.`)); });
-  });
+  let releaseAgentSlot = await acquireAgentSlot();
+  let result;
+  try {
+    result = await new Promise((resolvePlan, rejectPlan) => {
+      const id = `planner:${crypto.randomUUID()}`;
+      const child = spawn(adapter.command, args, { cwd: root, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      let output = '';
+      let settled = false;
+      let timedOut = false;
+      const finish = (error, code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        plannerProcesses.delete(id);
+        if (timedOut) rejectPlan(new Error(`Planner timed out after ${timeoutMs}ms.`));
+        else if (error) rejectPlan(error);
+        else if (code === 0) resolvePlan(output);
+        else rejectPlan(new Error(output.trim() || `Planner exited with ${code}.`));
+      };
+      const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+      plannerProcesses.set(id, { child, timer });
+      releaseAgentSlot();
+      releaseAgentSlot = null;
+      child.stdout.on('data', data => { output += data; });
+      child.stderr.on('data', data => { output += data; });
+      child.stdin.end(adapter.stdin === undefined ? undefined : String(adapter.stdin).replaceAll('{{prompt}}', prompt));
+      child.once('error', error => finish(error, null));
+      child.once('close', code => finish(null, code));
+    });
+  } finally {
+    releaseAgentSlot?.();
+  }
   const dag = extractJson(result);
   if (!dag || typeof dag.title !== 'string') throw new Error('Planner did not return a valid JSON run plan.');
   const tasks = validateDraftTasks(dag.tasks);
@@ -692,6 +1459,53 @@ async function createRunFromPlan(plan, overrides = {}) {
   }
 }
 
+async function confirmGroupConsensus(session, payload) {
+  if (session.status !== 'awaiting_confirmation') throw new Error('Only a completed discussion can be confirmed.');
+  const draft = payload.consensus || session.consensus;
+  if (!draft) throw new Error('A confirmed group session requires a task DAG.');
+  const consensus = await validateSessionConsensus(session, draft);
+  const memberById = new Map(session.members.map(member => [member.id, member]));
+  const tasks = consensus.tasks.map(task => {
+    const executor = memberById.get(task.executorMemberId);
+    const reviewer = memberById.get(task.reviewerMemberId);
+    const fixer = task.fixerMemberId ? memberById.get(task.fixerMemberId) : null;
+    if (executor?.role !== 'executor') throw new Error(`Task ${task.key} has an invalid executor assignment.`);
+    if (reviewer?.role !== 'reviewer') throw new Error(`Task ${task.key} has an invalid reviewer assignment.`);
+    if (session.max_repairs > 0 && fixer?.role !== 'fixer') throw new Error(`Task ${task.key} has an invalid fixer assignment.`);
+    return {
+      key: task.key, title: task.title, description: String(task.description || ''), agent: executor.agent,
+      files: task.files, dependsOn: task.dependsOn, acceptance: task.acceptance, risk: task.risk,
+      timeoutMs: task.timeoutMs, maxRetries: task.maxRetries,
+      executorMemberId: executor.id, reviewerMemberId: reviewer.id, fixerMemberId: fixer?.id || null
+    };
+  });
+  const normalizedTasks = validateDraftTasks(tasks);
+  for (const task of normalizedTasks) await acceptanceAllowed(task.acceptance, true);
+  const planId = `PLAN-GROUP-${session.id}`;
+  const createdAt = now();
+  const planDag = { title: String(consensus.title || 'Group run').trim(), tasks: normalizedTasks };
+  db.prepare('INSERT INTO plans(id, requirement, planner, dag_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(planId, session.requirement, `group:${session.group_id}`, JSON.stringify(planDag), 'ready', createdAt, createdAt);
+  const run = await createRunFromPlan(db.prepare('SELECT * FROM plans WHERE id = ?').get(planId), { title: planDag.title, tasks: normalizedTasks });
+  const createdTasks = runTasks(run.id);
+  db.exec('BEGIN');
+  try {
+    createdTasks.forEach((task, index) => {
+      const source = tasks[index];
+      db.prepare(`INSERT INTO task_role_assignments(task_id, session_id, executor_member_id, reviewer_member_id, fixer_member_id, stage, repair_count, max_repairs, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`).run(task.id, session.id, source.executorMemberId, source.reviewerMemberId, source.fixerMemberId, session.max_repairs, now());
+    });
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  const updated = updateGroupSession(session.id, { status: 'executing', consensus, run_id: run.id, finished_at: null, recovery_note: null });
+  appendEvent('group_session', `${session.id} confirmed as ${run.id}`, null, run.id);
+  await scheduleGroupAdvance();
+  return updated;
+}
+
 function ghExecutable() {
   if (process.env.AOD_GH_PATH) return process.env.AOD_GH_PATH;
   const windowsPath = 'C:\\Program Files\\GitHub CLI\\gh.exe';
@@ -703,18 +1517,45 @@ async function githubStatus() {
   const authenticated = await githubAuthenticated();
   let remote = null;
   try { remote = (await git(['remote', 'get-url', 'origin'])).stdout.trim(); } catch {}
-  return { available: await commandAvailable('gh'), authenticated, remote };
+  const login = githubLogin && !githubLogin.completed
+    ? { pending: true, deviceCode: githubLogin.deviceCode, deviceUrl: githubLogin.deviceUrl, startedAt: githubLogin.startedAt }
+    : null;
+  return { available: await commandAvailable('gh'), authenticated, remote, login };
 }
 async function commandAvailable(command) {
   try { await run(command === 'gh' ? ghExecutable() : command, ['--version'], root, 8000); return true; } catch { return false; }
 }
 function startGithubLogin() {
-  const child = spawn(ghExecutable(), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { cwd: root, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = '';
-  child.stdout.on('data', data => { output = `${output}${data}`.slice(-4000); appendEvent('github', redactSecrets(data), null, null); });
-  child.stderr.on('data', data => { output = `${output}${data}`.slice(-4000); appendEvent('github', redactSecrets(data), null, null); });
-  child.once('close', code => appendEvent('github', code === 0 ? 'GitHub authentication completed' : `GitHub authentication ended with ${code}: ${output.trim()}`, null, null));
-  return { started: true, message: 'GitHub device authentication started. Complete it in the opened browser or terminal window.' };
+  if (githubLogin && !githubLogin.completed) {
+    return { started: true, pending: true, message: 'GitHub device authentication is already in progress.', deviceCode: githubLogin.deviceCode, deviceUrl: githubLogin.deviceUrl };
+  }
+  const child = spawn(ghExecutable(), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], {
+    cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']
+  });
+  githubLogin = { child, startedAt: new Date().toISOString(), completed: false, deviceCode: null, deviceUrl: null, output: '', enterSent: false };
+  const receive = data => {
+    const text = String(data);
+    githubLogin.output = `${githubLogin.output}${text}`.slice(-4000);
+    githubLogin.deviceCode ||= githubLogin.output.match(/one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})/i)?.[1] || null;
+    githubLogin.deviceUrl ||= githubLogin.output.match(/https:\/\/github\.com\/login\/device/i)?.[0] || null;
+    appendEvent('github', redactSecrets(text), null, null);
+    if (!githubLogin.enterSent && /Press Enter to open/i.test(githubLogin.output) && child.stdin.writable) {
+      githubLogin.enterSent = true;
+      child.stdin.write('\n');
+    }
+  };
+  child.stdout.on('data', receive);
+  child.stderr.on('data', receive);
+  child.once('error', error => {
+    githubLogin.completed = true;
+    appendEvent('github', `GitHub authentication could not start: ${error.message}`, null, null);
+  });
+  child.once('close', code => {
+    const output = githubLogin.output;
+    githubLogin.completed = true;
+    appendEvent('github', code === 0 ? 'GitHub authentication completed' : `GitHub authentication ended with ${code}: ${output.trim()}`, null, null);
+  });
+  return { started: true, message: 'GitHub device authentication started. The authorization code will appear here shortly.' };
 }
 async function ensureGithubRemote(payload = {}) {
   const status = await githubStatus();
@@ -805,12 +1646,19 @@ async function cleanupTerminalWorktrees() {
 function publicState() {
   const tasks = listTasks();
   const runs = listRuns();
+  const groups = listGroups();
+  const groupSessions = listGroupSessions().map(session => ({
+    id: session.id, group_id: session.group_id, requirement: session.requirement, status: session.status,
+    current_round: session.current_round, max_rounds: session.max_rounds, max_repairs: session.max_repairs,
+    member_count: session.members.length, title: session.consensus?.title || null, run_id: session.run_id,
+    recovery_note: session.recovery_note, created_at: session.created_at, updated_at: session.updated_at
+  }));
   return {
     workspace: basename(root), mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
-    agents, statuses, transitions, tasks, runs, reviews: listReviews(),
+    agents, statuses, transitions, tasks, runs, groups, groupSessions, reviews: listReviews(),
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
-    runtime: { activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, recoveryRequired: tasks.filter(task => task.status === 'recovery_required').length },
-    stats: { total: tasks.length, runs: runs.length, worktrees: tasks.filter(task => task.worktree).length, mergeReady: tasks.filter(task => task.status === 'merge_ready').length, conflicts: tasks.filter(task => task.status === 'conflict_review').length }
+    runtime: { activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size, activeRoleProcesses: roleProcesses.size, activePlanners: plannerProcesses.size, recoveryRequired: tasks.filter(task => task.status === 'recovery_required').length + groupSessions.filter(session => session.status === 'recovery_required').length },
+    stats: { total: tasks.length, runs: runs.length, groups: groups.length, groupSessions: groupSessions.length, worktrees: tasks.filter(task => task.worktree).length, mergeReady: tasks.filter(task => task.status === 'merge_ready').length, conflicts: tasks.filter(task => task.status === 'conflict_review').length }
   };
 }
 
@@ -821,6 +1669,8 @@ async function api(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/health') return send(response, 200, { ok: true, gitReady: await gitReady(), workspace: root, database: databasePath, metrics: await healthMetrics(), lastBackupAt: getSetting('last_backup_at') });
   if (request.method === 'GET' && url.pathname === '/api/stream') {
     response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    const after = Math.max(0, Number(url.searchParams.get('after') || request.headers['last-event-id'] || 0) || 0);
+    for (const event of streamReplay) if (event.id > after) response.write(event.data);
     response.write(`event: state\ndata: ${JSON.stringify(publicState())}\n\n`);
     eventStreams.add(response);
     const keepAlive = setInterval(() => response.write(': keepalive\n\n'), 20000);
@@ -829,6 +1679,47 @@ async function api(request, response, url) {
   }
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
   if (request.method === 'GET' && url.pathname === '/api/github/status') return send(response, 200, await githubStatus());
+  if (url.pathname === '/api/groups') {
+    if (request.method === 'GET') return send(response, 200, listGroups());
+    if (request.method === 'POST') return send(response, 201, createGroup(await body(request)));
+  }
+  const groupSessionCreateMatch = url.pathname.match(/^\/api\/groups\/(G-\d+)\/sessions$/);
+  if (groupSessionCreateMatch && request.method === 'POST') return send(response, 201, createGroupSession(requireGroup(groupSessionCreateMatch[1]), await body(request)));
+  const groupArchiveMatch = url.pathname.match(/^\/api\/groups\/(G-\d+)\/archive$/);
+  if (groupArchiveMatch && request.method === 'POST') return send(response, 200, archiveGroup(requireGroup(groupArchiveMatch[1])));
+  const groupMatch = url.pathname.match(/^\/api\/groups\/(G-\d+)$/);
+  if (groupMatch && request.method === 'GET') return send(response, 200, requireGroup(groupMatch[1]));
+  if (groupMatch && request.method === 'PATCH') return send(response, 200, patchGroup(requireGroup(groupMatch[1]), await body(request)));
+  const groupSessionMatch = url.pathname.match(/^\/api\/group-sessions\/(GS-\d+)(?:\/(start|pause|resume|cancel|messages|confirm))?$/);
+  if (groupSessionMatch) {
+    const [, id, action] = groupSessionMatch;
+    const session = requireGroupSession(id);
+    if (request.method === 'GET' && !action) return send(response, 200, session);
+    if (request.method === 'GET' && action === 'messages') {
+      const after = Math.max(0, Number(url.searchParams.get('after') || 0));
+      return send(response, 200, db.prepare('SELECT * FROM group_messages WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT 500').all(id, after));
+    }
+    if (request.method === 'POST' && action === 'start') {
+      if (session.status !== 'draft') throw new Error('Only a draft group session can start discussion.');
+      return send(response, 202, startGroupDiscussion(session));
+    }
+    if (request.method === 'POST' && action === 'resume') return send(response, 202, resumeGroupSession(session));
+    if (request.method === 'POST' && action === 'confirm') return send(response, 201, await confirmGroupConsensus(session, await body(request)));
+    if (request.method === 'POST' && action === 'pause') {
+      if (!['discussing', 'synthesizing'].includes(session.status)) throw new Error('Only an active session can be paused.');
+      return send(response, 200, updateGroupSession(id, { pause_requested: true }));
+    }
+    if (request.method === 'POST' && action === 'cancel') {
+      return send(response, 200, cancelGroupSession(session));
+    }
+    if (request.method === 'POST' && action === 'messages') {
+      const payload = await body(request);
+      if (typeof payload.content !== 'string' || !payload.content.trim()) throw new Error('Operator message cannot be empty.');
+      if (['cancelled', 'completed', 'failed'].includes(session.status)) throw new Error('This session no longer accepts messages.');
+      const messageId = appendGroupMessage(id, { round: session.current_round, senderKind: 'operator', phase: 'operator_note', content: payload.content.trim() });
+      return send(response, 201, db.prepare('SELECT * FROM group_messages WHERE id = ?').get(messageId));
+    }
+  }
   if (request.method === 'POST' && url.pathname === '/api/github/connect') {
     if (!(await commandAvailable('gh'))) return send(response, 409, { error: 'GitHub CLI is not installed. Install gh, then retry.' });
     if (await githubAuthenticated()) return send(response, 200, { authenticated: true, ...(await githubStatus()) });
@@ -922,13 +1813,21 @@ async function api(request, response, url) {
     const payload = await body(request);
     return send(response, 200, await approveReview(requireReview(reviewMatch[1]), payload.patch));
   }
+  const groupTurnRecoveryMatch = url.pathname.match(/^\/api\/group-turns\/(GT-[\w-]+)\/recover$/);
+  if (groupTurnRecoveryMatch && request.method === 'POST') return send(response, 202, await recoverGroupTurn(requireGroupTurn(groupTurnRecoveryMatch[1]), await body(request)));
   return send(response, 404, { error: 'Not found.' });
 }
 
 const mime = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.html': 'text/html; charset=utf-8' };
+const publicFiles = new Set([
+  'index.html', 'styles.css', 'app.js',
+  'styles/tokens.css', 'styles/shell.css', 'styles/components.css', 'styles/views.css',
+  'ui/api.js', 'ui/state.js', 'ui/layout-state.js', 'ui/layout.js',
+  'ui/run-center.js', 'ui/group-console.js', 'ui/dialogs.js'
+]);
 async function staticFile(response, pathname) {
   const file = pathname === '/' ? 'index.html' : pathname.slice(1);
-  if (!['index.html', 'styles.css', 'app.js'].includes(file)) return send(response, 404, { error: 'Not found.' });
+  if (!publicFiles.has(file)) return send(response, 404, { error: 'Not found.' });
   const path = resolve(root, file);
   if (!(await exists(path))) return send(response, 404, { error: 'Not found.' });
   response.writeHead(200, { 'content-type': mime[extname(path)] || 'application/octet-stream' });

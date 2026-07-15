@@ -1,19 +1,50 @@
+import { request, connectStream } from './ui/api.js';
+import { createStore } from './ui/state.js';
+import { createLayout } from './ui/layout.js';
+import { createRunCenter } from './ui/run-center.js';
+import { createGroupConsole } from './ui/group-console.js';
+import { createDialogs } from './ui/dialogs.js';
+
 const $ = selector => document.querySelector(selector);
 const board = $('#taskBoard');
 const notice = $('#notice');
 const dialog = $('#taskDialog');
 const runDialog = $('#runDialog');
+const groupsBoard = $('#groupsBoard');
+const groupDialog = $('#groupDialog');
+const groupSessionDialog = $('#groupSessionDialog');
+const groupConsole = $('#groupConsole');
 let state = null;
 let selectedTaskId = null;
 let noticeTimer;
 let plannedRun = null;
-let stream = null;
 let refreshTimer;
+let editingGroupId = null;
+let selectedGroupId = null;
+let selectedGroupSessionId = null;
+let selectedGroupSession = null;
+let groupMessages = [];
+let groupMessagesAfter = 0;
+let groupDetailRequest = 0;
+let groupConsoleOpen = false;
 
 const statusLabels = {
-  draft: '草稿', preparing: '准备中', ready: '就绪', running: '运行中', verifying: '验证中', merge_ready: '待合并', merging: '合并中', conflict_review: '冲突审查', recovery_required: '恢复确认', failed: '失败', cancelled: '已取消', merged: '已合并'
+  draft: '草稿', preparing: '准备中', ready: '就绪', queued: '排队中', running: '运行中', discussing: '讨论中', paused: '已暂停', synthesizing: '汇总中', awaiting_confirmation: '待确认', executing: '执行中', awaiting_merge: '待合并', reviewing: '审查中', repairing: '修复中', verifying: '验证中', merge_ready: '待合并', merging: '合并中', conflict_review: '冲突审查', recovery_required: '恢复确认', completed: '已完成', passed: '已通过', pending: '等待中', skipped: '已跳过', failed: '失败', cancelled: '已取消', merged: '已合并'
 };
-const modeCopy = { manual: '每一步由操作者触发', hybrid: '自动准备与验收，人工启动与合并', auto: '自动推进至合并，冲突仍需人工确认' };
+const modeCopy = { manual: '每一步由操作者触发', hybrid: '自动准备与验收，人工启动与合并', auto: '自动准备、启动与验收，合并仍需人工确认' };
+const roleLabels = { executor: '执行', reviewer: '检查', fixer: '修复', advisor: '顾问' };
+const agentLabels = { codex: 'Codex', 'claude-code': 'Claude Code', antigravity: '反重力 2.0' };
+const store = createStore({ data: null, health: null, selection: {} });
+const layout = createLayout({
+  onRouteChange(route) {
+    if (route.taskId) selectedTaskId = route.taskId;
+    if (state) { renderBoard(); renderDetail(); }
+  }
+});
+const groupConsoleUi = createGroupConsole({ root: groupConsole });
+const dialogsUi = createDialogs();
+const runCenterUi = createRunCenter({ root: $('#contextInspector'), request, tell, onRefresh: refresh, getSelectedTask: selectedTask });
+void dialogsUi;
 
 function tell(message, kind = '') {
   notice.textContent = message;
@@ -24,12 +55,6 @@ function tell(message, kind = '') {
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]); }
 function statusLabel(status) { return statusLabels[status] || status; }
 function modeLabel(mode) { return { manual: '人工', hybrid: '混合', auto: '自动' }[mode] || mode; }
-async function request(path, options = {}) {
-  const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Request failed.');
-  return data;
-}
 function activeReview() { return state?.reviews.find(review => ['pending', 'running', 'suggested', 'failed'].includes(review.status)) || null; }
 function selectedTask() { return state?.tasks.find(task => task.id === selectedTaskId) || state?.tasks.find(task => ['running', 'verifying', 'conflict_review', 'merge_ready'].includes(task.status)) || state?.tasks[0] || null; }
 
@@ -72,13 +97,14 @@ function renderBoard() {
 
 function renderDetail() {
   const task = selectedTask();
-  if (!task) { $('#taskDetailTitle').textContent = '选择任务'; $('#taskDetailStatus').textContent = 'IDLE'; $('#taskDetailMeta').textContent = '从队列选择一个任务以查看运行记录。'; $('#taskOutput').textContent = 'No task selected.'; $('#verificationResult').innerHTML = ''; return; }
+  if (!task) { $('#taskDetailTitle').textContent = '选择任务'; $('#taskDetailStatus').textContent = 'IDLE'; $('#taskDetailMeta').textContent = '从队列选择一个任务以查看运行记录。'; $('#taskOutput').textContent = 'No task selected.'; $('#verificationResult').innerHTML = '<p class="empty">尚无验收结果。</p>'; $('#inspectorOverview').innerHTML = '<div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div>'; return; }
   selectedTaskId = task.id;
   $('#taskDetailTitle').textContent = `${task.id} ${task.title}`;
   $('#taskDetailStatus').textContent = statusLabel(task.status);
   $('#taskDetailMeta').textContent = `${task.agent} | ${task.worktree || '尚未准备 worktree'} | ${task.branch}`;
-  $('#taskOutput').textContent = task.output || '等待 Agent 输出。';
+  runCenterUi.setOutput(task.output || '等待 Agent 输出。');
   $('#verificationResult').innerHTML = task.verification ? `<span>验收：${escapeHtml(task.verification.command)}</span><b>${escapeHtml(task.verification.commit || '')}</b><pre>${escapeHtml(task.verification.output)}</pre>` : '';
+  $('#inspectorOverview').innerHTML = `<dl class="task-overview-grid"><div><dt>Agent</dt><dd>${escapeHtml(task.agent)}</dd></div><div><dt>状态</dt><dd>${statusLabel(task.status)}</dd></div><div><dt>Commit</dt><dd>${shortCommit(task.verified_commit)}</dd></div><div><dt>分支</dt><dd>${escapeHtml(task.branch || '—')}</dd></div><div class="wide"><dt>Worktree</dt><dd title="${escapeHtml(task.worktree || '')}">${escapeHtml(task.worktree || '尚未准备')}</dd></div><div class="wide"><dt>文件范围</dt><dd>${task.files.map(escapeHtml).join(', ')}</dd></div></dl><div class="inspector-actions">${taskActions(task) || '<span class="empty-inline">当前没有可执行操作</span>'}</div>`;
 }
 
 function renderReview() {
@@ -95,8 +121,175 @@ function renderEvents() {
   $('#events').innerHTML = state.events.length ? state.events.slice(0, 12).map(event => `<div class="event"><time>${new Date(event.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time><span>${escapeHtml(event.message)}</span></div>`).join('') : '<p class="empty">暂无事件。</p>';
 }
 
+function formatTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '--:--:--' : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function shortCommit(value) { return value ? String(value).slice(0, 8) : '—'; }
+function latestGroupSession(groupId) { return (state?.groupSessions || []).find(session => session.group_id === groupId) || null; }
+function groupById(groupId) { return (state?.groups || []).find(group => group.id === groupId) || null; }
+function memberName(memberId) { return selectedGroupSession?.members.find(member => member.id === memberId)?.displayName || memberId || '系统'; }
+
+function renderGroups() {
+  const groups = state?.groups || [];
+  if (!groups.length) { groupsBoard.innerHTML = '<p class="empty">还没有 Agent 群组。创建后可发起多轮讨论并确认执行 DAG。</p>'; return; }
+  groupsBoard.innerHTML = groups.map(group => {
+    const latest = latestGroupSession(group.id);
+    const members = group.members || [];
+    const roster = members.map(member => `<span class="group-role"><b>${escapeHtml(member.display_name)}</b><i>${escapeHtml(roleLabels[member.role] || member.role)}</i>${member.is_moderator ? '<em>主持</em>' : ''}</span>`).join('');
+    const latestCopy = latest
+      ? `<div class="group-latest"><span>${escapeHtml(latest.id)} / ${statusLabel(latest.status)}</span><strong>ROUND ${latest.current_round}/${latest.max_rounds}</strong><p>${escapeHtml(latest.title || latest.requirement)}</p></div>`
+      : '<div class="group-latest empty-session"><span>NO SESSION</span><p>尚未创建会话</p></div>';
+    return `<article class="group-card status-${escapeHtml(latest?.status || 'idle')}">
+      <div class="task-meta"><span>${escapeHtml(group.id)}</span><span>${members.length} MEMBERS</span></div>
+      <h3>${escapeHtml(group.name)}</h3><p class="group-description">${escapeHtml(group.description || '未设置群组描述。')}</p>
+      <div class="group-roster">${roster}</div>${latestCopy}
+      <div class="group-card-actions"><button class="small secondary" data-group-action="open" data-group-id="${escapeHtml(group.id)}">打开</button><button class="small primary" data-group-action="session" data-group-id="${escapeHtml(group.id)}">新会话</button><button class="small warn" data-group-action="archive" data-group-id="${escapeHtml(group.id)}">归档</button></div>
+    </article>`;
+  }).join('');
+}
+
+function renderGroupMembers() {
+  const members = selectedGroupSession?.members || [];
+  const turns = selectedGroupSession?.turns || [];
+  $('#groupConcurrency').textContent = `${state?.runtime?.activeGroupTurns || 0} / ${state?.maxConcurrency || 0}`;
+  if (!members.length) { $('#groupMembers').innerHTML = '<p class="empty">会话成员快照为空。</p>'; return; }
+  $('#groupMembers').innerHTML = members.map(member => {
+    const memberTurns = turns.filter(turn => turn.member_id === member.id);
+    const latestTurn = memberTurns[memberTurns.length - 1];
+    return `<div class="group-member-row">
+      <span class="turn-signal status-${escapeHtml(latestTurn?.status || 'idle')}" aria-hidden="true"></span>
+      <div><strong>${escapeHtml(member.displayName)}</strong><span>${escapeHtml(agentLabels[member.agent] || member.agent)}</span></div>
+      <div class="member-runtime"><b>${escapeHtml(roleLabels[member.role] || member.role)}${member.isModerator ? ' / 主持' : ''}</b><span>${latestTurn ? `R${latestTurn.round} ${escapeHtml(latestTurn.phase)} / ${statusLabel(latestTurn.status)}` : '等待发言'}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderGroupMessages() {
+  const container = $('#groupMessages');
+  const stickToBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 90;
+  if (!groupMessages.length) container.innerHTML = '<p class="empty">会话尚未产生消息。</p>';
+  else container.innerHTML = groupMessages.map(message => `<div class="group-message ${message.sender_kind === 'operator' ? 'operator' : 'member'}">
+    <div class="group-message-meta"><strong>${escapeHtml(message.sender_kind === 'operator' ? '操作者' : memberName(message.sender_member_id))}</strong><span>R${message.round} / ${escapeHtml(message.phase)}</span><time>${formatTime(message.at)}</time></div>
+    <div class="group-message-content">${escapeHtml(message.content)}</div>
+  </div>`).join('');
+  if (stickToBottom) container.scrollTop = container.scrollHeight;
+}
+
+function renderGroupControls() {
+  const session = selectedGroupSession;
+  const controls = $('#groupSessionControls');
+  const input = $('#groupMessageInput');
+  if (!session) {
+    $('#groupSessionMeta').innerHTML = '<p class="empty">没有打开的群组会话。</p>';
+    controls.innerHTML = '';
+    input.disabled = true;
+    return;
+  }
+  $('#groupSessionMeta').innerHTML = `<dl>
+    <div><dt>会话</dt><dd>${escapeHtml(session.id)}</dd></div><div><dt>状态</dt><dd>${statusLabel(session.status)}</dd></div>
+    <div><dt>轮次</dt><dd>${session.current_round} / ${session.max_rounds}</dd></div><div><dt>修复预算</dt><dd>${session.max_repairs}</dd></div>
+    <div><dt>运行</dt><dd>${escapeHtml(session.run_id || '未生成')}</dd></div><div><dt>更新</dt><dd>${formatTime(session.updated_at)}</dd></div>
+  </dl><p>${escapeHtml(session.requirement)}</p>${session.recovery_note ? `<div class="group-recovery-note">${escapeHtml(session.recovery_note)}</div>` : ''}`;
+  const buttons = [];
+  const recoveryTurns = (session.turns || []).filter(turn => turn.status === 'recovery_required');
+  if (session.status === 'draft') buttons.push('<button class="primary" data-session-action="start">启动讨论</button>');
+  if (['discussing', 'synthesizing'].includes(session.status)) buttons.push(`<button class="secondary" data-session-action="pause" ${session.pause_requested ? 'disabled' : ''}>${session.pause_requested ? '等待暂停' : '暂停'}</button>`);
+  if (session.status === 'paused' || (session.status === 'recovery_required' && !recoveryTurns.length)) buttons.push(`<button class="primary" data-session-action="resume">${session.run_id ? '重试角色流水线' : '恢复讨论'}</button>`);
+  if (session.status === 'recovery_required' && recoveryTurns.length) {
+    buttons.push(`<div class="turn-recovery-list">${recoveryTurns.map(turn => {
+      const member = session.members.find(item => item.id === turn.member_id);
+      const replacements = session.members.filter(item => item.id !== turn.member_id).map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.displayName)}</option>`).join('');
+      return `<div class="turn-recovery-row"><div><strong>${escapeHtml(member?.displayName || turn.member_id)}</strong><span>R${turn.round} / ${escapeHtml(turn.phase)}</span></div><div class="turn-recovery-actions"><button class="small primary" type="button" data-turn-recover="retry" data-turn-id="${escapeHtml(turn.id)}">重试</button>${turn.phase === 'synthesis' ? '' : `<button class="small secondary" type="button" data-turn-recover="skip" data-turn-id="${escapeHtml(turn.id)}">跳过</button>`}<select data-turn-replacement="${escapeHtml(turn.id)}" aria-label="替换 ${escapeHtml(member?.displayName || turn.member_id)}">${replacements}</select><button class="small secondary" type="button" data-turn-recover="replace" data-turn-id="${escapeHtml(turn.id)}">替换</button></div></div>`;
+    }).join('')}</div>`);
+  }
+  if (!['cancelled', 'completed', 'failed', 'awaiting_merge'].includes(session.status)) buttons.push('<button class="warn" data-session-action="cancel">取消会话</button>');
+  if (session.run_id) buttons.push('<button class="secondary" data-group-run-link type="button">查看运行</button>');
+  buttons.push('<button class="secondary" data-group-config type="button">编辑群组</button>');
+  controls.innerHTML = buttons.join('');
+  input.disabled = ['cancelled', 'completed', 'failed'].includes(session.status);
+}
+
+function roleSelect(taskIndex, field, role, selectedId, allowEmpty = false) {
+  const candidates = (selectedGroupSession?.members || []).filter(member => member.role === role);
+  const empty = allowEmpty ? '<option value="">不启用</option>' : '';
+  return `<select data-consensus-field="${field}" aria-label="任务 ${taskIndex + 1} ${roleLabels[role]}">${empty}${candidates.map(member => `<option value="${escapeHtml(member.id)}" ${member.id === selectedId ? 'selected' : ''}>${escapeHtml(member.displayName)}</option>`).join('')}</select>`;
+}
+
+function renderConsensusList(label, items) {
+  if (!Array.isArray(items) || !items.length) return '';
+  return `<div><b>${label}</b><ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>`;
+}
+
+function renderGroupConsensus() {
+  const content = $('#groupConsensusContent');
+  const session = selectedGroupSession;
+  const consensus = session?.consensus;
+  if (!session) { content.innerHTML = '<p class="empty">讨论结束后将在这里生成可确认的执行 DAG。</p>'; return; }
+  if (!consensus) {
+    const copy = ['discussing', 'synthesizing'].includes(session.status) ? `第 ${session.current_round}/${session.max_rounds} 轮进行中，等待主持者汇总。` : session.status === 'draft' ? '启动讨论后将生成任务 DAG。' : '当前会话还没有可展示的共识。';
+    content.innerHTML = `<p class="empty">${escapeHtml(copy)}</p>`;
+    return;
+  }
+  const editable = session.status === 'awaiting_confirmation';
+  const memberMap = new Map(session.members.map(member => [member.id, member]));
+  const rows = consensus.tasks.map((task, index) => {
+    const assignment = session.assignments[index];
+    const runtimeTask = assignment ? state.tasks.find(item => item.id === assignment.task_id) : null;
+    const commit = assignment?.review_commit || runtimeTask?.verified_commit;
+    const taskCell = editable
+      ? `<span class="dag-key">${escapeHtml(task.key)}</span><input data-consensus-field="title" value="${escapeHtml(task.title)}" aria-label="${escapeHtml(task.key)} 标题" /><textarea data-consensus-field="description" rows="2" aria-label="${escapeHtml(task.key)} 描述">${escapeHtml(task.description || '')}</textarea>`
+      : `<span class="dag-key">${escapeHtml(task.key)}</span><strong>${escapeHtml(task.title)}</strong><small>${escapeHtml(task.description || '')}</small>`;
+    const scopeCell = editable
+      ? `<input data-consensus-field="files" value="${escapeHtml((task.files || []).join(', '))}" aria-label="${escapeHtml(task.key)} 文件" /><input data-consensus-field="dependsOn" value="${escapeHtml((task.dependsOn || []).join(', '))}" aria-label="${escapeHtml(task.key)} 依赖" />`
+      : `<span>${escapeHtml((task.files || []).join(', '))}</span><small>依赖：${escapeHtml((task.dependsOn || []).join(', ') || '无')}</small>`;
+    const gateCell = editable
+      ? `<input data-consensus-field="acceptance" value="${escapeHtml(task.acceptance || '')}" aria-label="${escapeHtml(task.key)} 验收命令" /><input data-consensus-field="risk" value="${escapeHtml(task.risk || '')}" aria-label="${escapeHtml(task.key)} 风险" />`
+      : `<span>${escapeHtml(task.acceptance || '未设置')}</span><small>${escapeHtml(task.risk || '无风险说明')}</small>`;
+    const roleCell = editable
+      ? `${roleSelect(index, 'executorMemberId', 'executor', task.executorMemberId)}${roleSelect(index, 'reviewerMemberId', 'reviewer', task.reviewerMemberId)}${roleSelect(index, 'fixerMemberId', 'fixer', task.fixerMemberId, session.max_repairs === 0)}`
+      : `<span>执行 / ${escapeHtml(memberMap.get(task.executorMemberId)?.displayName || '—')}</span><span>检查 / ${escapeHtml(memberMap.get(task.reviewerMemberId)?.displayName || '—')}</span><span>修复 / ${escapeHtml(memberMap.get(task.fixerMemberId)?.displayName || '—')}</span>`;
+    return `<tr data-consensus-task="${index}"><td data-label="任务">${taskCell}</td><td data-label="范围 / 依赖">${scopeCell}</td><td data-label="验收 / 风险">${gateCell}</td><td data-label="角色映射" class="dag-roles">${roleCell}</td><td data-label="执行状态" class="dag-runtime"><b>${statusLabel(assignment?.stage || (editable ? 'pending' : session.status))}</b><span>Commit ${shortCommit(commit)}</span><span>修复 ${assignment?.repair_count || 0}/${assignment?.max_repairs ?? session.max_repairs}</span></td></tr>`;
+  }).join('');
+  const title = editable ? `<label class="consensus-title-field">运行标题<input id="groupConsensusRunTitle" value="${escapeHtml(consensus.title || '')}" maxlength="120" /></label>` : `<h4>${escapeHtml(consensus.title || '群组共识')}</h4>`;
+  content.innerHTML = `<form id="groupConsensusForm">
+    <div class="consensus-summary">${title}<p>${escapeHtml(consensus.summary || '')}</p><div class="consensus-notes">${renderConsensusList('决策', consensus.decisions)}${renderConsensusList('风险', consensus.risks)}${renderConsensusList('分歧', consensus.disagreements)}</div></div>
+    <div class="consensus-table-wrap"><table class="consensus-table"><thead><tr><th>任务</th><th>范围 / 依赖</th><th>验收 / 风险</th><th>角色映射</th><th>执行状态</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${editable ? '<div class="consensus-actions"><span>确认后将创建运行并进入角色流水线。</span><button class="primary" type="submit">确认 DAG 并执行</button></div>' : ''}
+  </form>`;
+}
+
+function renderGroupConsole() {
+  groupConsole.hidden = !groupConsoleOpen;
+  if (!groupConsoleOpen) return;
+  const group = groupById(selectedGroupId || selectedGroupSession?.group_id);
+  $('#groupConsoleTitle').textContent = group ? `${group.name} / 运行中心` : '群组运行中心';
+  $('#groupConsoleStatus').textContent = selectedGroupSession ? `${selectedGroupSession.id} / ${statusLabel(selectedGroupSession.status)}` : 'LOADING';
+  $('#groupRound').textContent = selectedGroupSession ? `ROUND ${selectedGroupSession.current_round} / ${selectedGroupSession.max_rounds}` : 'ROUND 0 / 0';
+  renderGroupMembers();
+  renderGroupMessages();
+  renderGroupControls();
+  renderGroupConsensus();
+}
+
+function readConsensusForm() {
+  const consensus = JSON.parse(JSON.stringify(selectedGroupSession.consensus));
+  consensus.title = $('#groupConsensusRunTitle').value.trim();
+  $('#groupConsensusForm').querySelectorAll('[data-consensus-task]').forEach(row => {
+    const task = consensus.tasks[Number(row.dataset.consensusTask)];
+    row.querySelectorAll('[data-consensus-field]').forEach(field => {
+      const key = field.dataset.consensusField;
+      if (key === 'files' || key === 'dependsOn') task[key] = field.value.split(/[\n,]/).map(value => value.trim()).filter(Boolean);
+      else if (key === 'fixerMemberId') task[key] = field.value || null;
+      else task[key] = field.value.trim();
+    });
+  });
+  return consensus;
+}
+
 function render(nextState, health) {
   state = nextState;
+  store.setState({ data: nextState, health, selection: { taskId: selectedTaskId, groupId: selectedGroupId, sessionId: selectedGroupSessionId } });
   $('#workspace').textContent = state.workspace;
   $('#health').textContent = health.gitReady ? `Daemon online / ${state.integrationBranch}` : 'Git baseline required';
   $('#health').classList.toggle('warning', !health.gitReady);
@@ -108,36 +301,283 @@ function render(nextState, health) {
   $('#mergeCount').textContent = state.stats.mergeReady;
   $('#conflictCount').textContent = state.stats.conflicts;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
-  renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+  renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+}
+
+async function refreshSelectedGroupSession(resetMessages = false) {
+  if (!selectedGroupSessionId) return;
+  const sessionId = selectedGroupSessionId;
+  const requestId = ++groupDetailRequest;
+  const after = resetMessages ? 0 : groupMessagesAfter;
+  const [session, messages] = await Promise.all([
+    request(`/api/group-sessions/${sessionId}`),
+    request(`/api/group-sessions/${sessionId}/messages?after=${after}`)
+  ]);
+  if (requestId !== groupDetailRequest || sessionId !== selectedGroupSessionId) return;
+  selectedGroupSession = session;
+  selectedGroupId = session.group_id;
+  if (resetMessages) { groupMessages = []; groupMessagesAfter = 0; }
+  const known = new Set(groupMessages.map(message => message.id));
+  for (const message of messages) if (!known.has(message.id)) groupMessages.push(message);
+  groupMessages.sort((left, right) => left.id - right.id);
+  groupMessagesAfter = groupMessages.length ? groupMessages[groupMessages.length - 1].id : 0;
+  renderGroupConsole();
+}
+
+async function openGroupSession(sessionId, groupId = null) {
+  selectedGroupSessionId = sessionId;
+  selectedGroupId = groupId;
+  selectedGroupSession = null;
+  groupMessages = [];
+  groupMessagesAfter = 0;
+  groupConsoleOpen = true;
+  groupConsoleUi.setActivePane('chat');
+  renderGroupConsole();
+  await refreshSelectedGroupSession(true);
+  groupConsole.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 async function refresh() {
   try {
     const [nextState, health, github] = await Promise.all([request('/api/state'), request('/api/health'), request('/api/github/status').catch(error => ({ error: error.message }))]);
     render(nextState, health);
-    $('#githubStatus').textContent = github.authenticated ? `GitHub 已连接${github.remote ? ' / origin 已配置' : ' / 未配置远程'}` : github.available ? 'GitHub 未认证，点击连接' : 'GitHub CLI 未安装';
+    const login = github.login;
+    $('#githubStatus').textContent = github.authenticated ? `GitHub 已连接${github.remote ? ' / origin 已配置' : ' / 未配置远程'}` : login?.pending ? (login.deviceCode ? `GitHub code: ${login.deviceCode}` : 'GitHub authorization is starting...') : github.available ? 'GitHub 未认证，点击连接' : 'GitHub CLI 未安装';
+    $('#githubStatus').title = login?.deviceUrl || '';
     $('#githubStatus').classList.toggle('warning', !github.authenticated);
+    if (selectedGroupSessionId) await refreshSelectedGroupSession();
   }
   catch (error) { tell(error.message, 'error'); }
 }
 
 function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 120); }
-function connectStream() {
-  if (stream) stream.close();
-  stream = new EventSource('/api/stream');
-  stream.addEventListener('event', scheduleRefresh);
-  stream.addEventListener('log', scheduleRefresh);
-  stream.onerror = () => { stream.close(); stream = null; setTimeout(connectStream, 2000); };
+
+const groupMemberDefaults = {
+  codex: { role: 'executor', displayName: 'Codex 执行', instructions: '拆解方案并负责实现与提交。' },
+  'claude-code': { role: 'reviewer', displayName: 'Claude 检查', instructions: '检查假设、验收结果与潜在回归。' },
+  antigravity: { role: 'fixer', displayName: '反重力 修复', instructions: '根据审查意见执行最小范围修复。' }
+};
+
+function syncGroupMemberRows() {
+  const rows = [...$('#groupMemberEditor').querySelectorAll('[data-agent]')];
+  for (const row of rows) {
+    const enabled = row.querySelector('[name="enabled"]').checked;
+    row.classList.toggle('disabled', !enabled);
+    row.querySelector('[name="moderatorKey"]').disabled = !enabled;
+  }
+  const enabledRows = rows.filter(row => row.querySelector('[name="enabled"]').checked);
+  const moderator = rows.find(row => row.querySelector('[name="moderatorKey"]').checked && !row.querySelector('[name="moderatorKey"]').disabled);
+  if (!moderator && enabledRows.length) enabledRows[0].querySelector('[name="moderatorKey"]').checked = true;
+}
+
+function resetGroupForm() {
+  const form = $('#groupForm');
+  form.reset();
+  editingGroupId = null;
+  $('#groupDialogTitle').textContent = '创建 Agent 群组';
+  $('#groupFormSubmit').textContent = '创建群组';
+  for (const row of form.querySelectorAll('[data-agent]')) {
+    const agent = row.dataset.agent;
+    const defaults = groupMemberDefaults[agent];
+    row.dataset.memberKey = agent;
+    row.querySelector('[name="enabled"]').checked = true;
+    row.querySelector('[name="role"]').value = defaults.role;
+    row.querySelector('[name="displayName"]').value = defaults.displayName;
+    row.querySelector('[name="instructions"]').value = defaults.instructions;
+    const radio = row.querySelector('[name="moderatorKey"]');
+    radio.value = agent;
+    radio.checked = agent === 'codex';
+  }
+  syncGroupMemberRows();
+}
+
+function openGroupEditor(groupId = null) {
+  resetGroupForm();
+  const group = groupId ? groupById(groupId) : null;
+  if (group) {
+    editingGroupId = group.id;
+    $('#groupDialogTitle').textContent = `编辑 ${group.name}`;
+    $('#groupFormSubmit').textContent = '保存群组';
+    const form = $('#groupForm');
+    form.querySelector('[name="name"]').value = group.name;
+    form.querySelector('[name="description"]').value = group.description || '';
+    form.querySelector('[name="maxRounds"]').value = String(group.max_rounds);
+    form.querySelector('[name="maxRepairs"]').value = String(group.max_repairs);
+    for (const row of form.querySelectorAll('[data-agent]')) {
+      const member = group.members.find(item => item.agent === row.dataset.agent);
+      row.querySelector('[name="enabled"]').checked = Boolean(member);
+      if (!member) continue;
+      row.dataset.memberKey = member.key;
+      row.querySelector('[name="role"]').value = member.role;
+      row.querySelector('[name="displayName"]').value = member.display_name;
+      row.querySelector('[name="instructions"]').value = member.instructions || '';
+      const radio = row.querySelector('[name="moderatorKey"]');
+      radio.value = member.key;
+      radio.checked = member.is_moderator;
+    }
+    syncGroupMemberRows();
+  }
+  groupDialog.showModal();
+}
+
+function readGroupForm() {
+  const form = $('#groupForm');
+  const enabledRows = [...form.querySelectorAll('[data-agent]')].filter(row => row.querySelector('[name="enabled"]').checked);
+  if (enabledRows.length < 2) throw new Error('至少启用 2 个 Agent 成员。');
+  const members = enabledRows.map(row => ({
+    key: row.dataset.memberKey,
+    agent: row.dataset.agent,
+    role: row.querySelector('[name="role"]').value,
+    displayName: row.querySelector('[name="displayName"]').value.trim(),
+    instructions: row.querySelector('[name="instructions"]').value.trim()
+  }));
+  const maxRepairs = Number(form.querySelector('[name="maxRepairs"]').value);
+  if (!members.some(member => member.role === 'executor')) throw new Error('群组至少需要一名 executor。');
+  if (!members.some(member => member.role === 'reviewer')) throw new Error('群组至少需要一名 reviewer。');
+  if (maxRepairs > 0 && !members.some(member => member.role === 'fixer')) throw new Error('修复次数大于 0 时至少需要一名 fixer。');
+  const moderator = enabledRows.find(row => row.querySelector('[name="moderatorKey"]').checked);
+  if (!moderator) throw new Error('请选择一名主持者。');
+  return {
+    name: form.querySelector('[name="name"]').value.trim(),
+    description: form.querySelector('[name="description"]').value.trim(),
+    maxRounds: Number(form.querySelector('[name="maxRounds"]').value),
+    maxRepairs,
+    moderatorKey: moderator.dataset.memberKey,
+    members
+  };
+}
+
+function openGroupSessionDialog(groupId) {
+  const group = groupById(groupId);
+  const form = $('#groupSessionForm');
+  form.reset();
+  form.querySelector('[name="groupId"]').value = groupId;
+  $('#groupSessionTarget').textContent = group ? `${group.id} / ${group.name}` : groupId;
+  groupSessionDialog.showModal();
 }
 
 $('#openTaskDialog').addEventListener('click', () => dialog.showModal());
 $('#openRunDialog').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; runDialog.showModal(); });
+$('#openGroupDialog').addEventListener('click', () => openGroupEditor());
 $('#refresh').addEventListener('click', refresh);
 $('#githubStatus').addEventListener('click', async () => { try { const result = await request('/api/github/connect', { method: 'POST', body: '{}' }); tell(result.message || 'GitHub 已连接。'); await refresh(); } catch (error) { tell(error.message, 'error'); } });
 $('#modeSwitch').addEventListener('click', event => { const button = event.target.closest('[data-mode]'); if (button) $('#modeSwitch').dataset.pendingMode = button.dataset.mode; $('#modeSwitch').querySelectorAll('button').forEach(item => item.classList.toggle('active', item === button)); });
 $('#saveSettings').addEventListener('click', async () => {
   try { await request('/api/settings', { method: 'POST', body: JSON.stringify({ mode: $('#modeSwitch').dataset.pendingMode || state.mode, maxConcurrency: Number($('#maxConcurrency').value) }) }); tell('运行策略已更新。'); await refresh(); }
   catch (error) { tell(error.message, 'error'); }
+});
+
+$('#groupMemberEditor').addEventListener('change', event => {
+  if (event.target.matches('[name="enabled"], [name="moderatorKey"]')) syncGroupMemberRows();
+});
+
+$('#groupForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') return groupDialog.close();
+  try {
+    const payload = readGroupForm();
+    const path = editingGroupId ? `/api/groups/${editingGroupId}` : '/api/groups';
+    const saved = await request(path, { method: editingGroupId ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+    groupDialog.close();
+    tell(`${saved.id} ${editingGroupId ? '配置已更新' : '已创建'}。`);
+    await refresh();
+  } catch (error) { tell(error.message, 'error'); }
+});
+
+$('#groupSessionForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') return groupSessionDialog.close();
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  const groupId = form.get('groupId');
+  try {
+    const session = await request(`/api/groups/${groupId}/sessions`, { method: 'POST', body: JSON.stringify({ requirement: form.get('requirement') }) });
+    groupSessionDialog.close();
+    formElement.reset();
+    tell(`${session.id} 已创建，可在运行中心启动讨论。`);
+    await refresh();
+    await openGroupSession(session.id, groupId);
+  } catch (error) { tell(error.message, 'error'); }
+});
+
+groupsBoard.addEventListener('click', async event => {
+  const button = event.target.closest('[data-group-action]');
+  if (!button) return;
+  const groupId = button.dataset.groupId;
+  try {
+    if (button.dataset.groupAction === 'session') return openGroupSessionDialog(groupId);
+    if (button.dataset.groupAction === 'open') {
+      const latest = latestGroupSession(groupId);
+      return latest ? await openGroupSession(latest.id, groupId) : openGroupEditor(groupId);
+    }
+    if (button.dataset.groupAction === 'archive') {
+      const group = groupById(groupId);
+      if (!window.confirm(`归档 ${group?.name || groupId}？已有会话记录仍会保留。`)) return;
+      await request(`/api/groups/${groupId}/archive`, { method: 'POST', body: '{}' });
+      if (selectedGroupId === groupId) { groupConsoleOpen = false; renderGroupConsole(); }
+      tell(`${groupId} 已归档。`);
+      await refresh();
+    }
+  } catch (error) { tell(error.message, 'error'); }
+});
+
+$('#closeGroupConsole').addEventListener('click', () => { groupConsoleOpen = false; renderGroupConsole(); });
+groupConsole.addEventListener('click', async event => {
+  const tab = event.target.closest('[data-group-tab]');
+  if (tab) return;
+  if (event.target.closest('[data-group-config]')) return openGroupEditor(selectedGroupId);
+  if (event.target.closest('[data-group-run-link]')) return $('.runs-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const recovery = event.target.closest('[data-turn-recover]');
+  if (recovery) {
+    const action = recovery.dataset.turnRecover;
+    const turnId = recovery.dataset.turnId;
+    const replacement = groupConsole.querySelector(`[data-turn-replacement="${turnId}"]`);
+    recovery.disabled = true;
+    try {
+      await request(`/api/group-turns/${turnId}/recover`, { method: 'POST', body: JSON.stringify({ action, replacementMemberId: action === 'replace' ? replacement?.value : undefined }) });
+      tell({ retry: '失败回合已重试。', skip: '失败回合已跳过。', replace: '替换成员回合已完成。' }[action]);
+      await refreshSelectedGroupSession();
+      await refresh();
+    } catch (error) { recovery.disabled = false; tell(error.message, 'error'); }
+    return;
+  }
+  const action = event.target.closest('[data-session-action]');
+  if (!action || !selectedGroupSessionId) return;
+  const endpoint = action.dataset.sessionAction;
+  if (endpoint === 'cancel' && !window.confirm(`取消会话 ${selectedGroupSessionId}？`)) return;
+  action.disabled = true;
+  try {
+    await request(`/api/group-sessions/${selectedGroupSessionId}/${endpoint}`, { method: 'POST', body: '{}' });
+    tell({ start: '讨论已启动。', pause: '暂停请求已提交。', resume: '讨论已恢复。', cancel: '会话已取消。' }[endpoint]);
+    await refresh();
+  } catch (error) { action.disabled = false; tell(error.message, 'error'); }
+});
+
+$('#groupMessageForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = $('#groupMessageInput');
+  const content = input.value.trim();
+  if (!content || !selectedGroupSessionId) return;
+  try {
+    input.disabled = true;
+    await request(`/api/group-sessions/${selectedGroupSessionId}/messages`, { method: 'POST', body: JSON.stringify({ content }) });
+    input.value = '';
+    await refreshSelectedGroupSession();
+  } catch (error) { tell(error.message, 'error'); }
+  finally { renderGroupControls(); input.focus(); }
+});
+
+$('#groupConsensus').addEventListener('submit', async event => {
+  if (event.target.id !== 'groupConsensusForm') return;
+  event.preventDefault();
+  const button = event.submitter;
+  try {
+    button.disabled = true;
+    const consensus = readConsensusForm();
+    await request(`/api/group-sessions/${selectedGroupSessionId}/confirm`, { method: 'POST', body: JSON.stringify({ consensus }) });
+    tell('共识 DAG 已确认，角色流水线开始执行。');
+    await refresh();
+  } catch (error) { button.disabled = false; tell(error.message, 'error'); }
 });
 
 $('#runForm').addEventListener('submit', async event => {
@@ -164,15 +604,16 @@ $('#confirmPlan').addEventListener('click', async () => {
 $('#taskForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (event.submitter?.value === 'cancel') return dialog.close();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   try {
     const task = await request('/api/tasks', { method: 'POST', body: JSON.stringify({ title: form.get('title'), agent: form.get('agent'), files: String(form.get('files')).split(',').map(value => value.trim()).filter(Boolean), dependsOn: form.get('dependsOn') ? [form.get('dependsOn')] : [], acceptance: form.get('acceptance'), timeoutMs: Number(form.get('timeoutMinutes')) * 60000, maxRetries: Number(form.get('maxRetries')) }) });
-    selectedTaskId = task.id; dialog.close(); event.currentTarget.reset(); tell('任务已创建。当前模式会决定后续自动步骤。'); await refresh();
+    selectedTaskId = task.id; dialog.close(); formElement.reset(); tell('任务已创建。当前模式会决定后续自动步骤。'); await refresh();
   } catch (error) { tell(error.message, 'error'); }
 });
 
 board.addEventListener('click', async event => {
-  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; renderBoard(); renderDetail(); return; }
+  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); layout.setRoute({ view: 'runs', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); return; }
   const action = event.target.closest('[data-action]'); if (!action) return;
   try {
     const endpoint = { prepare: 'prepare', start: 'start', verify: 'verify', merge: 'merge', review: 'review' }[action.dataset.action];
@@ -200,4 +641,10 @@ $('#reviewContent').addEventListener('click', async event => {
 });
 
 refresh();
-connectStream();
+connectStream({
+  onEvent: scheduleRefresh,
+  onConnection(status) {
+    $('#streamState').textContent = status === 'online' ? '实时连接' : '正在重连';
+    $('#appNav').classList.toggle('is-reconnecting', status !== 'online');
+  }
+});

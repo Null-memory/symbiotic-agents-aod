@@ -1,0 +1,29 @@
+:root {
+  color-scheme: light;
+  --surface-canvas:#edf1f1;
+  --surface-panel:#ffffff;
+  --surface-subtle:#f6f8f8;
+  --surface-accent:#dce8e7;
+  --surface-live:#182326;
+  --surface-live-soft:#202e31;
+  --text-primary:#182428;
+  --text-secondary:#46575c;
+  --text-muted:#718085;
+  --text-on-dark:#e7eeee;
+  --border:#ccd6d8;
+  --border-strong:#aebdc0;
+  --accent:#087f75;
+  --accent-bright:#55d4c6;
+  --command:#e95e4f;
+  --warning:#b77a18;
+  --danger:#b83f36;
+  --radius-panel:8px;
+  --radius-control:6px;
+  --shadow-float:0 14px 34px rgba(24,36,40,.14);
+  --motion-fast:140ms;
+  --motion-layout:240ms;
+  --nav-width:208px;
+  --inspector-width:360px;
+  --font-ui:Bahnschrift,"Microsoft YaHei UI","PingFang SC",sans-serif;
+  --font-mono:"Cascadia Mono","SFMono-Regular",Consolas,monospace;
+}

@@ -2,6 +2,7 @@
   "reviewerAgent": "codex",
   "defaults": {
     "agentTimeoutMs": 1800000,
+    "groupTurnTimeoutMs": 600000,
     "reviewTimeoutMs": 600000,
     "plannerTimeoutMs": 600000,
     "maxRetries": 0
@@ -12,11 +13,13 @@
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"]
+      "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"],
+      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"]
     },
     "claude-code": {
       "command": "claude",
-      "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"]
+      "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"],
+      "reviewArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"]
     },
     "antigravity": {
       "command": "antigravity",

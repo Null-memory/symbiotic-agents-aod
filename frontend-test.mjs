@@ -1,0 +1,74 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, apiModule, layoutModule, runCenterModule, groupConsoleModule, dialogsModule, server, readme, configExampleText] = await Promise.all([
+  readFile(new URL('./index.html', import.meta.url), 'utf8'),
+  readFile(new URL('./styles.css', import.meta.url), 'utf8'),
+  readFile(new URL('./styles/tokens.css', import.meta.url), 'utf8'),
+  readFile(new URL('./styles/shell.css', import.meta.url), 'utf8'),
+  readFile(new URL('./styles/components.css', import.meta.url), 'utf8'),
+  readFile(new URL('./styles/views.css', import.meta.url), 'utf8'),
+  readFile(new URL('./app.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/api.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/layout.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/run-center.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/group-console.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/dialogs.js', import.meta.url), 'utf8'),
+  readFile(new URL('./server.mjs', import.meta.url), 'utf8'),
+  readFile(new URL('./README.md', import.meta.url), 'utf8'),
+  readFile(new URL('./aod.config.example.json', import.meta.url), 'utf8')
+]);
+const css = [stylesEntry, tokensCss, shellCss, componentsCss, viewsCss].join('\n');
+const configExample = JSON.parse(configExampleText);
+
+for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'inspectorResizeHandle']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Desktop shell is missing #${id}.`);
+}
+assert.match(html, /<script\s+type="module"\s+src="app\.js"><\/script>/);
+assert.match(shellCss, /--inspector-width/);
+assert.match(shellCss, /grid-template-columns:[^;]*var\(--inspector-width\)/);
+assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.summary-grid\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.topbar-context\{display:none\}/);
+assert.equal(layoutModule.includes('aria-valuenow'), true);
+assert.equal(apiModule.includes('Last-Event-ID'), true);
+assert.equal(runCenterModule.includes('createRunCenter'), true);
+assert.equal(groupConsoleModule.includes('createGroupConsole'), true);
+assert.equal(dialogsModule.includes('createDialogs'), true);
+const streamEndpointSource = server.slice(server.indexOf("url.pathname === '/api/stream'"), server.indexOf("url.pathname === '/api/state'"));
+const broadcastSource = server.slice(server.indexOf('function broadcast'), server.indexOf('function appendEvent'));
+assert.match(streamEndpointSource, /last-event-id/i);
+assert.match(streamEndpointSource, /streamReplay/);
+assert.match(broadcastSource, /id:/);
+
+for (const id of ['groupsBoard', 'openGroupDialog', 'groupDialog', 'groupConsole', 'groupMessages', 'groupConsensus']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Console is missing #${id}.`);
+}
+
+assert.match(css, /@media\s*\(max-width:560px\)[\s\S]*?\.group-mobile-tabs\s*\{[^}]*display:flex/);
+assert.equal(css.includes('[data-active-pane="chat"] [data-mobile-pane]:not([data-mobile-pane="chat"])'), true);
+assert.equal(css.includes('[data-active-pane="members"] [data-mobile-pane]:not([data-mobile-pane="members"])'), true);
+assert.equal(css.includes('[data-active-pane="consensus"] [data-mobile-pane]:not([data-mobile-pane="consensus"])'), true);
+assert.match(css, /@media\s*\(max-width:560px\)[\s\S]*?\.consensus-table[^}]*display:block/);
+assert.equal(script.includes('data-turn-recover'), true);
+assert.equal(script.includes('/api/group-turns/'), true);
+assert.equal(
+  script.includes('event.currentTarget.reset()'),
+  false,
+  'Async submit handlers must capture the form before awaiting.'
+);
+const cancelSessionSource = server.slice(
+  server.indexOf('function cancelGroupSession'),
+  server.indexOf('async function recoverGroupTurn')
+);
+assert.equal(
+  cancelSessionSource.includes('processes.delete(key)'),
+  false,
+  'Cancellation must retain process slots until child exit handlers run.'
+);
+assert.equal(script.includes("auto: '自动准备、启动与验收，合并仍需人工确认'"), true);
+assert.equal(readme.includes('- `auto`：自动准备、启动和验收；任务合并仍由操作者确认。'), true);
+assert.equal(server.includes('Reviewer adapters require a dedicated reviewArgs array.'), true);
+assert.equal(configExample.agents.codex.reviewArgs.includes('read-only'), true);
+assert.equal(configExample.agents['claude-code'].reviewArgs.includes('plan'), true);
+
+console.log('AOD frontend contract test passed');
