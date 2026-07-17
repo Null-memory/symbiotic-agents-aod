@@ -69,7 +69,24 @@
               <section class="work-section runs-section"><div class="section-head"><div><p class="kicker">DELIVERY RUNS</p><h2>运行与交付</h2></div><button class="github-status" id="githubStatus" type="button">GitHub 检查中</button></div><div class="runs-board" id="runsBoard"><p class="empty">还没有运行单元。</p></div></section>
             </section>
 
+            <section class="work-section run-overview-section"><div class="section-head"><div><p class="kicker">ACTIVE RUNS</p><h2>活动运行</h2></div></div><div class="run-overview-board" id="runOverviewBoard"><p class="empty">还没有运行单元。</p></div></section>
+
             <section class="work-section event-section"><div class="section-head"><div><p class="kicker">EVENT STREAM</p><h2>编排记录</h2></div></div><div class="events" id="events"><p class="empty">暂无事件。</p></div></section>
+          </section>
+
+          <section class="workspace-view" data-view-panel="groups">
+            <header class="page-heading"><div><p class="kicker">COLLABORATION TEMPLATES</p><h1>Agent 群组</h1><p>配置成员职责，启动结构化讨论并确认执行 DAG。</p></div></header>
+            <div class="view-host" data-view-host="groups"></div>
+          </section>
+
+          <section class="workspace-view" data-view-panel="tasks">
+            <header class="page-heading"><div><p class="kicker">TASK TOPOLOGY</p><h1>任务队列</h1><p>查看文件边界、依赖、执行状态与验收门禁。</p></div><div class="page-actions"><button class="primary" id="openTaskDialogFromTasks" type="button">新建任务</button></div></header>
+            <div class="view-host" data-view-host="tasks"></div>
+          </section>
+
+          <section class="workspace-view" data-view-panel="delivery">
+            <header class="page-heading"><div><p class="kicker">GITHUB DELIVERY</p><h1>GitHub 交付</h1><p>推送运行集成分支，跟踪 PR 与 CI 门禁。</p></div></header>
+            <div class="view-host" data-view-host="delivery"></div>
           </section>
         </main>
       </div>

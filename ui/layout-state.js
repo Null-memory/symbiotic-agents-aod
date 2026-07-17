@@ -1,6 +1,7 @@
 export const INSPECTOR_MIN = 280;
 export const INSPECTOR_MAX = 560;
 export const INSPECTOR_DEFAULT = 360;
+export const APP_VIEWS = ['runs', 'groups', 'tasks', 'delivery'];
 
 export function clampInspectorWidth(value) {
   if (value === null || value === undefined || value === '') return INSPECTOR_DEFAULT;
@@ -11,11 +12,16 @@ export function clampInspectorWidth(value) {
 
 export function parseRoute(hash = '') {
   const params = new URLSearchParams(String(hash).replace(/^#\/?/, ''));
+  const requestedView = params.get('view');
   return {
-    view: params.get('view') || 'runs',
+    view: APP_VIEWS.includes(requestedView) ? requestedView : 'runs',
     runId: params.get('run') || null,
     taskId: params.get('task') || null
   };
+}
+
+export function isViewActive(panelView, routeView) {
+  return panelView === routeView;
 }
 
 export function serializeRoute(route = {}) {

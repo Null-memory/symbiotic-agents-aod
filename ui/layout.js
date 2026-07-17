@@ -1,4 +1,4 @@
-import { INSPECTOR_DEFAULT, INSPECTOR_MAX, INSPECTOR_MIN, clampInspectorWidth, parseRoute, serializeRoute } from './layout-state.js';
+import { INSPECTOR_DEFAULT, INSPECTOR_MAX, INSPECTOR_MIN, clampInspectorWidth, isViewActive, parseRoute, serializeRoute } from './layout-state.js';
 
 const safeStorage = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -12,6 +12,8 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
   const collapseButton = document.querySelector('#collapseInspector');
   const expandButton = document.querySelector('#expandInspector');
   const navButton = document.querySelector('#toggleNav');
+  const workspace = document.querySelector('#workspaceMain');
+  const viewScrollPositions = new Map();
   let width = clampInspectorWidth(safeStorage.get('aod.inspectorWidth'));
   let dragging = false;
 
@@ -40,8 +42,11 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
   };
 
   const renderRoute = route => {
+    const currentPanel = document.querySelector('[data-view-panel].active');
+    if (currentPanel) viewScrollPositions.set(currentPanel.dataset.viewPanel, workspace.scrollTop);
     document.querySelectorAll('[data-view]').forEach(item => item.classList.toggle('active', item.dataset.view === route.view));
-    document.querySelectorAll('[data-view-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.viewPanel === route.view || (route.view !== 'runs' && panel.dataset.viewPanel === 'runs')));
+    document.querySelectorAll('[data-view-panel]').forEach(panel => panel.classList.toggle('active', isViewActive(panel.dataset.viewPanel, route.view)));
+    workspace.scrollTop = viewScrollPositions.get(route.view) || 0;
     onRouteChange(route);
   };
 
@@ -91,8 +96,6 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
     const item = event.target.closest('[data-view]');
     if (!item) return;
     setRoute({ view: item.dataset.view });
-    const target = { groups: '.groups-section', tasks: '.tasks-section', delivery: '.runs-section' }[item.dataset.view];
-    if (target) document.querySelector(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
   document.querySelector('.inspector-tabs').addEventListener('click', event => {

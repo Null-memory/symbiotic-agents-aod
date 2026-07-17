@@ -24,6 +24,12 @@ const configExample = JSON.parse(configExampleText);
 for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'inspectorResizeHandle']) {
   assert.equal(html.includes(`id="${id}"`), true, `Desktop shell is missing #${id}.`);
 }
+for (const view of ['runs', 'groups', 'tasks', 'delivery']) {
+  assert.equal(html.includes(`data-view-panel="${view}"`), true, `Desktop shell is missing the ${view} view.`);
+}
+assert.equal((html.match(/data-view-panel=/g) || []).length, 4, 'Desktop shell must expose exactly four primary views.');
+assert.equal(layoutModule.includes("route.view !== 'runs'"), false, 'Routes must not fall back to the runs panel after selection.');
+assert.equal(layoutModule.includes('scrollIntoView'), false, 'Primary navigation must switch views instead of scrolling one long page.');
 assert.match(html, /<script\s+type="module"\s+src="app\.js"><\/script>/);
 assert.match(shellCss, /--inspector-width/);
 assert.match(shellCss, /grid-template-columns:[^;]*var\(--inspector-width\)/);

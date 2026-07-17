@@ -14,6 +14,25 @@ const groupsBoard = $('#groupsBoard');
 const groupDialog = $('#groupDialog');
 const groupSessionDialog = $('#groupSessionDialog');
 const groupConsole = $('#groupConsole');
+
+function mountPrimaryViews() {
+  const placements = {
+    groups: ['.groups-section', '#groupConsole'],
+    tasks: ['.tasks-section'],
+    delivery: ['.runs-section']
+  };
+  for (const [view, selectors] of Object.entries(placements)) {
+    const host = document.querySelector(`[data-view-host="${view}"]`);
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      if (element) host.append(element);
+    }
+  }
+  const legacyGrid = document.querySelector('.work-grid');
+  if (legacyGrid && !legacyGrid.children.length) legacyGrid.remove();
+}
+
+mountPrimaryViews();
 let state = null;
 let selectedTaskId = null;
 let noticeTimer;
@@ -72,7 +91,18 @@ function taskActions(task) {
 
 function renderRuns() {
   const runsBoard = $('#runsBoard');
-  if (!state.runs?.length) { runsBoard.innerHTML = '<p class="empty">还没有运行单元。新建运行可让 Codex 先生成任务 DAG。</p>'; return; }
+  const overviewBoard = $('#runOverviewBoard');
+  if (!state.runs?.length) {
+    const empty = '<p class="empty">还没有运行单元。新建运行可让 Codex 先生成任务 DAG。</p>';
+    runsBoard.innerHTML = empty;
+    overviewBoard.innerHTML = empty;
+    return;
+  }
+  overviewBoard.innerHTML = state.runs.map(run => {
+    const tasks = state.tasks.filter(task => task.run_id === run.id);
+    const completed = tasks.filter(task => ['merged', 'completed'].includes(task.status)).length;
+    return `<article class="run-overview-row"><div><span>${escapeHtml(run.id)}</span><strong>${escapeHtml(run.title)}</strong></div><div class="run-progress"><span>${completed}/${tasks.length} 任务</span><span>${escapeHtml(run.integration_branch)}</span></div><b class="status-pill">${escapeHtml(run.status)}</b></article>`;
+  }).join('');
   runsBoard.innerHTML = state.runs.map(run => {
     const tasks = state.tasks.filter(task => task.run_id === run.id);
     const merged = tasks.filter(task => task.status === 'merged').length;
@@ -331,6 +361,7 @@ async function openGroupSession(sessionId, groupId = null) {
   groupMessages = [];
   groupMessagesAfter = 0;
   groupConsoleOpen = true;
+  layout.setRoute({ view: 'groups' });
   groupConsoleUi.setActivePane('chat');
   renderGroupConsole();
   await refreshSelectedGroupSession(true);
@@ -457,6 +488,7 @@ function openGroupSessionDialog(groupId) {
 }
 
 $('#openTaskDialog').addEventListener('click', () => dialog.showModal());
+$('#openTaskDialogFromTasks').addEventListener('click', () => dialog.showModal());
 $('#openRunDialog').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; runDialog.showModal(); });
 $('#openGroupDialog').addEventListener('click', () => openGroupEditor());
 $('#refresh').addEventListener('click', refresh);
@@ -526,7 +558,7 @@ groupConsole.addEventListener('click', async event => {
   const tab = event.target.closest('[data-group-tab]');
   if (tab) return;
   if (event.target.closest('[data-group-config]')) return openGroupEditor(selectedGroupId);
-  if (event.target.closest('[data-group-run-link]')) return $('.runs-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (event.target.closest('[data-group-run-link]')) return layout.setRoute({ view: 'delivery', runId: selectedGroupSession?.run_id || null });
   const recovery = event.target.closest('[data-turn-recover]');
   if (recovery) {
     const action = recovery.dataset.turnRecover;
@@ -597,7 +629,7 @@ $('#confirmPlan').addEventListener('click', async () => {
   try {
     const tasks = JSON.parse($('#planTasks').value);
     const run = await request('/api/runs', { method: 'POST', body: JSON.stringify({ planId: plannedRun.id, title: $('#planTitle').textContent, tasks }) });
-    tell(`${run.id} 已创建，集成分支和任务已准备。`); runDialog.close(); await refresh();
+    tell(`${run.id} 已创建，集成分支和任务已准备。`); runDialog.close(); layout.setRoute({ view: 'runs', runId: run.id }); await refresh();
   } catch (error) { tell(error.message || '任务 JSON 无效。', 'error'); }
 });
 
@@ -608,12 +640,12 @@ $('#taskForm').addEventListener('submit', async event => {
   const form = new FormData(formElement);
   try {
     const task = await request('/api/tasks', { method: 'POST', body: JSON.stringify({ title: form.get('title'), agent: form.get('agent'), files: String(form.get('files')).split(',').map(value => value.trim()).filter(Boolean), dependsOn: form.get('dependsOn') ? [form.get('dependsOn')] : [], acceptance: form.get('acceptance'), timeoutMs: Number(form.get('timeoutMinutes')) * 60000, maxRetries: Number(form.get('maxRetries')) }) });
-    selectedTaskId = task.id; dialog.close(); formElement.reset(); tell('任务已创建。当前模式会决定后续自动步骤。'); await refresh();
+    selectedTaskId = task.id; dialog.close(); formElement.reset(); layout.setRoute({ view: 'tasks', taskId: task.id }); tell('任务已创建。当前模式会决定后续自动步骤。'); await refresh();
   } catch (error) { tell(error.message, 'error'); }
 });
 
 board.addEventListener('click', async event => {
-  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); layout.setRoute({ view: 'runs', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); return; }
+  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); layout.setRoute({ view: 'tasks', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); return; }
   const action = event.target.closest('[data-action]'); if (!action) return;
   try {
     const endpoint = { prepare: 'prepare', start: 'start', verify: 'verify', merge: 'merge', review: 'review' }[action.dataset.action];
