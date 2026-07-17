@@ -26,6 +26,9 @@
           <div class="topbar-context"><strong>多 Agent 协同工作区</strong><span id="workspace">Loading workspace</span></div>
           <div class="topbar-controls">
             <span class="health" id="health">Checking daemon</span>
+            <div class="mode-switch view-mode-switch" id="viewModeSwitch" role="group" aria-label="页面显示方式">
+              <button data-view-mode="all" type="button" aria-pressed="false">整页</button><button class="active" data-view-mode="split" type="button" aria-pressed="true">分区</button>
+            </div>
             <div class="mode-switch" id="modeSwitch" role="group" aria-label="运行模式">
               <button data-mode="manual">人工</button><button data-mode="hybrid">混合</button><button data-mode="auto">自动</button>
             </div>

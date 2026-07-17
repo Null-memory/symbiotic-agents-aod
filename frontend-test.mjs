@@ -28,8 +28,13 @@ for (const view of ['runs', 'groups', 'tasks', 'delivery']) {
   assert.equal(html.includes(`data-view-panel="${view}"`), true, `Desktop shell is missing the ${view} view.`);
 }
 assert.equal((html.match(/data-view-panel=/g) || []).length, 4, 'Desktop shell must expose exactly four primary views.');
+assert.equal(html.includes('id="viewModeSwitch"'), true, 'Desktop shell is missing the workspace display mode control.');
+assert.equal(html.includes('data-view-mode="all"'), true, 'Desktop shell is missing the continuous-page option.');
+assert.equal(html.includes('data-view-mode="split"'), true, 'Desktop shell is missing the separate-view option.');
 assert.equal(layoutModule.includes("route.view !== 'runs'"), false, 'Routes must not fall back to the runs panel after selection.');
-assert.equal(layoutModule.includes('scrollIntoView'), false, 'Primary navigation must switch views instead of scrolling one long page.');
+assert.equal(layoutModule.includes("aod.workspaceViewMode"), true, 'Workspace display mode must persist locally.');
+assert.equal(layoutModule.includes('scrollIntoView'), true, 'Continuous-page navigation must reveal its selected section.');
+assert.equal(shellCss.includes('.is-view-mode-all .workspace-view'), true, 'Continuous-page mode needs dedicated workspace layout rules.');
 assert.match(html, /<script\s+type="module"\s+src="app\.js"><\/script>/);
 assert.match(shellCss, /--inspector-width/);
 assert.match(shellCss, /grid-template-columns:[^;]*var\(--inspector-width\)/);

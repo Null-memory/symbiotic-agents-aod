@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { APP_VIEWS, clampInspectorWidth, isViewActive, parseRoute, serializeRoute } from './ui/layout-state.js';
+import { APP_VIEWS, VIEW_MODES, clampInspectorWidth, isViewActive, normalizeViewMode, parseRoute, serializeRoute } from './ui/layout-state.js';
 
 test('clamps inspector width to the desktop range', () => {
   assert.equal(clampInspectorWidth(null), 360);
@@ -17,9 +17,22 @@ test('round trips run and task selection through the hash route', () => {
 
 test('only activates a panel whose view exactly matches the route', () => {
   assert.deepEqual(APP_VIEWS, ['runs', 'groups', 'tasks', 'delivery']);
-  assert.equal(isViewActive('groups', 'groups'), true);
-  assert.equal(isViewActive('runs', 'groups'), false);
-  assert.equal(isViewActive('delivery', 'groups'), false);
+  assert.equal(isViewActive('groups', 'groups', 'split'), true);
+  assert.equal(isViewActive('runs', 'groups', 'split'), false);
+  assert.equal(isViewActive('delivery', 'groups', 'split'), false);
+});
+
+test('normalizes workspace view modes', () => {
+  assert.deepEqual(VIEW_MODES, ['split', 'all']);
+  assert.equal(normalizeViewMode('all'), 'all');
+  assert.equal(normalizeViewMode('split'), 'split');
+  assert.equal(normalizeViewMode('unknown'), 'split');
+  assert.equal(normalizeViewMode(null), 'split');
+});
+
+test('all mode activates every primary workspace panel', () => {
+  for (const view of APP_VIEWS) assert.equal(isViewActive(view, 'groups', 'all'), true);
+  assert.equal(isViewActive('unknown', 'groups', 'all'), false);
 });
 
 test('falls back to runs for an unknown view', () => {

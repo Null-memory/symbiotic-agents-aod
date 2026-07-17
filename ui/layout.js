@@ -1,4 +1,4 @@
-import { INSPECTOR_DEFAULT, INSPECTOR_MAX, INSPECTOR_MIN, clampInspectorWidth, isViewActive, parseRoute, serializeRoute } from './layout-state.js';
+import { INSPECTOR_DEFAULT, INSPECTOR_MAX, INSPECTOR_MIN, clampInspectorWidth, isViewActive, normalizeViewMode, parseRoute, serializeRoute } from './layout-state.js';
 
 const safeStorage = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -13,8 +13,10 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
   const expandButton = document.querySelector('#expandInspector');
   const navButton = document.querySelector('#toggleNav');
   const workspace = document.querySelector('#workspaceMain');
+  const viewModeSwitch = document.querySelector('#viewModeSwitch');
   const viewScrollPositions = new Map();
   let width = clampInspectorWidth(safeStorage.get('aod.inspectorWidth'));
+  let viewMode = normalizeViewMode(safeStorage.get('aod.workspaceViewMode'));
   let dragging = false;
 
   const applyWidth = value => {
@@ -41,24 +43,54 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
     safeStorage.set('aod.navCollapsed', collapsed ? '1' : '0');
   };
 
-  const renderRoute = route => {
+  const rememberSplitScroll = () => {
+    if (viewMode !== 'split') return;
     const currentPanel = document.querySelector('[data-view-panel].active');
     if (currentPanel) viewScrollPositions.set(currentPanel.dataset.viewPanel, workspace.scrollTop);
+  };
+
+  const revealView = (view, behavior = 'smooth') => {
+    document.querySelector(`[data-view-panel="${view}"]`)?.scrollIntoView({ behavior, block: 'start' });
+  };
+
+  const renderViewMode = () => {
+    shell.classList.toggle('is-view-mode-all', viewMode === 'all');
+    viewModeSwitch.querySelectorAll('[data-view-mode]').forEach(button => {
+      const active = button.dataset.viewMode === viewMode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+  };
+
+  const renderRoute = (route, { rememberScroll = true, reveal = false } = {}) => {
+    if (rememberScroll) rememberSplitScroll();
     document.querySelectorAll('[data-view]').forEach(item => item.classList.toggle('active', item.dataset.view === route.view));
-    document.querySelectorAll('[data-view-panel]').forEach(panel => panel.classList.toggle('active', isViewActive(panel.dataset.viewPanel, route.view)));
-    workspace.scrollTop = viewScrollPositions.get(route.view) || 0;
+    document.querySelectorAll('[data-view-panel]').forEach(panel => panel.classList.toggle('active', isViewActive(panel.dataset.viewPanel, route.view, viewMode)));
+    if (viewMode === 'split') workspace.scrollTop = viewScrollPositions.get(route.view) || 0;
+    else if (reveal) requestAnimationFrame(() => revealView(route.view));
     onRouteChange(route);
   };
 
-  const setRoute = (route, { replace = false } = {}) => {
+  const setRoute = (route, { replace = false, reveal = viewMode === 'all' } = {}) => {
     const next = serializeRoute(route);
     if (location.hash !== next) history[replace ? 'replaceState' : 'pushState'](null, '', next);
-    renderRoute(parseRoute(next));
+    renderRoute(parseRoute(next), { reveal });
+  };
+
+  const setViewMode = value => {
+    const nextMode = normalizeViewMode(value);
+    if (nextMode === viewMode) return;
+    rememberSplitScroll();
+    viewMode = nextMode;
+    safeStorage.set('aod.workspaceViewMode', viewMode);
+    renderViewMode();
+    renderRoute(parseRoute(location.hash), { rememberScroll: false, reveal: viewMode === 'all' });
   };
 
   applyWidth(width || INSPECTOR_DEFAULT);
   setInspectorCollapsed(safeStorage.get('aod.inspectorCollapsed') === '1');
   setNavCollapsed(safeStorage.get('aod.navCollapsed') === '1');
+  renderViewMode();
 
   handle.addEventListener('pointerdown', event => {
     if (shell.classList.contains('is-inspector-collapsed')) return;
@@ -91,6 +123,10 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
   collapseButton.addEventListener('click', () => setInspectorCollapsed(true));
   expandButton.addEventListener('click', () => setInspectorCollapsed(false));
   navButton.addEventListener('click', () => setNavCollapsed(!shell.classList.contains('is-nav-collapsed')));
+  viewModeSwitch.addEventListener('click', event => {
+    const button = event.target.closest('[data-view-mode]');
+    if (button) setViewMode(button.dataset.viewMode);
+  });
 
   document.querySelector('#appNav').addEventListener('click', event => {
     const item = event.target.closest('[data-view]');
@@ -106,8 +142,8 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
     document.querySelectorAll('[data-inspector-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.inspectorPanel === name));
   });
 
-  window.addEventListener('hashchange', () => renderRoute(parseRoute(location.hash)));
-  renderRoute(parseRoute(location.hash));
+  window.addEventListener('hashchange', () => renderRoute(parseRoute(location.hash), { reveal: viewMode === 'all' }));
+  renderRoute(parseRoute(location.hash), { reveal: viewMode === 'all' });
 
-  return { applyWidth, setInspectorCollapsed, setNavCollapsed, setRoute, getRoute: () => parseRoute(location.hash), getInspectorWidth: () => width };
+  return { applyWidth, setInspectorCollapsed, setNavCollapsed, setRoute, setViewMode, getRoute: () => parseRoute(location.hash), getViewMode: () => viewMode, getInspectorWidth: () => width };
 }
