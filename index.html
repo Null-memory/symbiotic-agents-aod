@@ -25,6 +25,11 @@
         <header class="app-topbar" id="appTopbar">
           <div class="topbar-context"><strong>多 Agent 协同工作区</strong><span id="workspace">Loading workspace</span></div>
           <div class="topbar-controls">
+            <div class="command-search" role="search">
+              <input id="commandSearch" type="search" autocomplete="off" placeholder="搜索运行、任务、群组" aria-label="全局搜索" />
+              <div class="command-search-results" id="commandSearchResults" role="listbox" hidden></div>
+            </div>
+            <button class="pending-action-button" id="pendingActionCount" type="button" title="查看待处理操作"><span>待处理</span><strong>0</strong></button>
             <span class="health" id="health">Checking daemon</span>
             <div class="mode-switch view-mode-switch" id="viewModeSwitch" role="group" aria-label="页面显示方式">
               <button data-view-mode="all" type="button" aria-pressed="false">整页</button><button class="active" data-view-mode="split" type="button" aria-pressed="true">分区</button>
@@ -44,6 +49,16 @@
               <div class="page-actions"><button class="secondary" id="openTaskDialog" type="button">单个任务</button><button class="primary" id="openRunDialog" type="button">新建需求</button></div>
             </header>
 
+            <section class="run-command-band" aria-label="当前运行阶段与下一动作">
+              <div class="run-stage-bar" id="runStageBar">
+                <div class="run-stage is-current" data-stage="requirement"><span>01</span><strong>需求</strong></div>
+                <div class="run-stage" data-stage="collaboration"><span>02</span><strong>协作</strong></div>
+                <div class="run-stage" data-stage="gates"><span>03</span><strong>门禁</strong></div>
+                <div class="run-stage" data-stage="delivery"><span>04</span><strong>交付</strong></div>
+              </div>
+              <div class="next-action" id="nextAction"><div><span>NEXT ACTION</span><strong>选择或新建一个运行</strong></div><button class="primary compact" type="button" data-next-action="create">新建运行</button></div>
+            </section>
+
             <section class="summary-grid" aria-label="运行摘要">
               <article><span>运行单元</span><strong id="runCount">0</strong></article>
               <article><span>活跃 Agent</span><strong id="agentCount">0 / 0</strong></article>
@@ -51,40 +66,29 @@
               <article><span>待审批</span><strong id="conflictCount">0</strong></article>
             </section>
 
-            <section class="work-section metrics-section" aria-labelledby="metricsTitle">
-              <div class="section-head"><div><p class="kicker">RUNTIME TELEMETRY</p><h2 id="metricsTitle">运行指标</h2></div><span class="status-pill" id="metricsWindow">LAST 24H</span></div>
+            <details class="work-section operational-disclosure metrics-section" aria-labelledby="metricsTitle">
+              <summary class="section-head"><div><p class="kicker">RUNTIME TELEMETRY</p><h2 id="metricsTitle">运行指标</h2></div><span class="status-pill" id="metricsWindow">LAST 24H</span></summary>
               <div class="metrics-board" id="metricsBoard"><p class="empty">正在汇总 Agent 运行指标。</p></div>
-            </section>
+            </details>
 
-            <section class="work-section process-section" aria-labelledby="processTitle">
-              <div class="section-head"><div><p class="kicker">PROCESS LEASES</p><h2 id="processTitle">进程监视</h2></div><span class="status-pill" id="processCount">0 RECORDS</span></div>
+            <details class="work-section operational-disclosure process-section" aria-labelledby="processTitle">
+              <summary class="section-head"><div><p class="kicker">PROCESS LEASES</p><h2 id="processTitle">进程监视</h2></div><span class="status-pill" id="processCount">0 RECORDS</span></summary>
               <div class="process-monitor" id="processMonitor"><p class="empty">当前没有 Agent 进程记录。</p></div>
-            </section>
+            </details>
 
-            <section class="work-section approval-section" aria-labelledby="approvalTitle">
-              <div class="section-head"><div><p class="kicker">OPERATOR INBOX</p><h2 id="approvalTitle">统一审批中心</h2></div><span class="status-pill" id="approvalQueueLabel">0 PENDING</span></div>
+            <details class="work-section operational-disclosure approval-section" aria-labelledby="approvalTitle" open>
+              <summary class="section-head"><div><p class="kicker">OPERATOR INBOX</p><h2 id="approvalTitle">统一审批中心</h2></div><span class="status-pill" id="approvalQueueLabel">0 PENDING</span></summary>
               <div class="approval-board" id="approvalBoard"><p class="empty">当前没有等待确认的操作。</p></div>
-            </section>
+            </details>
 
-            <section class="work-section agent-health-section" aria-labelledby="agentHealthTitle">
-              <div class="section-head"><div><p class="kicker">ADAPTER PREFLIGHT</p><h2 id="agentHealthTitle">Agent 连接体检</h2></div><button class="secondary compact" id="checkAllAgents" type="button">检查全部</button></div>
+            <details class="work-section operational-disclosure agent-health-section" aria-labelledby="agentHealthTitle">
+              <summary class="section-head"><div><p class="kicker">ADAPTER PREFLIGHT</p><h2 id="agentHealthTitle">Agent 连接体检</h2></div><button class="secondary compact" id="checkAllAgents" type="button">检查全部</button></summary>
               <div class="agent-health-board" id="agentHealthBoard"><p class="empty">正在读取 Agent 连接状态。</p></div>
-            </section>
+            </details>
 
             <section class="work-section groups-section" aria-labelledby="groupsTitle">
               <div class="section-head"><div><p class="kicker">AGENT GROUPS</p><h2 id="groupsTitle">Agent 群组</h2></div><button class="primary compact" id="openGroupDialog" type="button">创建群组</button></div>
               <div class="groups-board" id="groupsBoard"><p class="empty">正在读取群组配置。</p></div>
-            </section>
-
-            <section class="group-console" id="groupConsole" data-active-pane="chat" aria-labelledby="groupConsoleTitle" hidden>
-              <div class="section-head group-console-head"><div><p class="kicker">GROUP OPERATIONS CENTER</p><h2 id="groupConsoleTitle">群组运行中心</h2></div><div class="group-console-heading-meta"><span class="status-pill" id="groupConsoleStatus">IDLE</span><button class="icon-button" id="closeGroupConsole" type="button" aria-label="关闭群组运行中心" title="关闭">×</button></div></div>
-              <div class="group-mobile-tabs" role="tablist" aria-label="群组运行中心视图"><button type="button" role="tab" aria-selected="true" data-group-tab="chat">聊天</button><button type="button" role="tab" aria-selected="false" data-group-tab="members">成员</button><button type="button" role="tab" aria-selected="false" data-group-tab="consensus">共识</button></div>
-              <div class="group-console-grid">
-                <section class="group-pane group-members-pane" data-mobile-pane="members" aria-labelledby="groupMembersTitle"><div class="group-pane-head"><div><p class="kicker">ROSTER</p><h3 id="groupMembersTitle">成员与并发</h3></div><span id="groupConcurrency">0 / 0</span></div><div class="group-members" id="groupMembers"><p class="empty">选择会话后显示成员。</p></div></section>
-                <section class="group-pane group-chat-pane" data-mobile-pane="chat" aria-labelledby="groupMessagesTitle"><div class="group-pane-head"><div><p class="kicker">DISCUSSION TIMELINE</p><h3 id="groupMessagesTitle">消息时间线</h3></div><span id="groupRound">ROUND 0 / 0</span></div><div class="group-messages" id="groupMessages" aria-live="polite"><p class="empty">会话尚未产生消息。</p></div><form class="group-message-form" id="groupMessageForm"><input id="groupMessageInput" name="content" maxlength="4000" autocomplete="off" aria-label="操作者消息，下一轮生效" placeholder="补充约束或操作指令（下一轮生效）" /><button class="secondary" type="submit">发送</button></form></section>
-                <aside class="group-pane group-control-pane" data-mobile-pane="consensus" aria-labelledby="groupControlsTitle"><div class="group-pane-head"><div><p class="kicker">SESSION CONTROL</p><h3 id="groupControlsTitle">会话控制</h3></div></div><div class="group-session-meta" id="groupSessionMeta"><p class="empty">没有打开的群组会话。</p></div><div class="group-session-controls" id="groupSessionControls"></div></aside>
-              </div>
-              <section class="group-consensus" id="groupConsensus" data-mobile-pane="consensus" aria-labelledby="groupConsensusTitle"><div class="group-consensus-head"><div><p class="kicker">CONSENSUS / EXECUTION DAG</p><h3 id="groupConsensusTitle">共识与任务拓扑</h3></div></div><div id="groupConsensusContent"><p class="empty">讨论结束后将在这里生成可确认的执行 DAG。</p></div></section>
             </section>
 
             <section class="work-grid">
@@ -92,7 +96,7 @@
               <section class="work-section runs-section"><div class="section-head"><div><p class="kicker">DELIVERY RUNS</p><h2>运行与交付</h2></div><button class="github-status" id="githubStatus" type="button">GitHub 检查中</button></div><div class="runs-board" id="runsBoard"><p class="empty">还没有运行单元。</p></div></section>
             </section>
 
-            <section class="work-section run-overview-section"><div class="section-head"><div><p class="kicker">ACTIVE RUNS</p><h2>活动运行</h2></div></div><div class="run-overview-board" id="runOverviewBoard"><p class="empty">还没有运行单元。</p></div></section>
+            <details class="work-section operational-disclosure run-overview-section"><summary class="section-head"><div><p class="kicker">ACTIVE RUNS</p><h2>活动运行</h2></div></summary><div class="run-overview-board" id="runOverviewBoard"><p class="empty">还没有运行单元。</p></div></details>
 
             <section class="work-section event-section"><div class="section-head"><div><p class="kicker">EVENT STREAM</p><h2>编排记录</h2></div></div><div class="events" id="events"><p class="empty">暂无事件。</p></div></section>
           </section>
@@ -116,16 +120,39 @@
 
       <div class="inspector-resize" id="inspectorResizeHandle" role="separator" aria-orientation="vertical" aria-label="调整任务详情宽度" aria-valuemin="280" aria-valuemax="560" aria-valuenow="360" tabindex="0" title="拖动调整任务详情宽度"></div>
 
-      <aside class="context-inspector" id="contextInspector" aria-label="任务详情">
-        <button class="inspector-reopen" id="expandInspector" type="button" aria-label="展开任务详情" title="展开任务详情">‹</button>
+      <aside class="context-inspector" id="contextInspector" aria-label="工作上下文">
+        <button class="inspector-reopen" id="expandInspector" type="button" aria-label="展开上下文坞" title="展开上下文坞"><span>‹</span><small>上下文</small></button>
         <div class="inspector-content">
-          <header class="inspector-head"><div><p class="kicker">TASK INSPECTOR</p><h2 id="taskDetailTitle">选择任务</h2></div><div class="inspector-tools"><span id="inspectorWidthLabel">360px</span><button class="icon-button" id="collapseInspector" type="button" aria-label="收起任务详情" title="收起任务详情">›</button></div></header>
+          <header class="inspector-head"><div><p class="kicker">ADAPTIVE CONTEXT</p><h2 id="taskDetailTitle">工作上下文</h2></div><div class="inspector-tools"><span id="inspectorWidthLabel">360px</span><button class="icon-button" id="collapseInspector" type="button" aria-label="收起上下文坞" title="收起上下文坞">›</button></div></header>
           <div class="inspector-status-line"><span class="status-pill" id="taskDetailStatus">IDLE</span><p id="taskDetailMeta">从队列选择一个任务以查看运行记录。</p></div>
-          <div class="inspector-tabs" role="tablist" aria-label="任务详情视图"><button class="active" type="button" role="tab" aria-selected="true" data-inspector-tab="overview">概览</button><button type="button" role="tab" aria-selected="false" data-inspector-tab="output">实时输出</button><button type="button" role="tab" aria-selected="false" data-inspector-tab="verification">验收</button><button type="button" role="tab" aria-selected="false" data-inspector-tab="review">审查</button></div>
-          <section class="inspector-panel active" data-inspector-panel="overview"><div class="inspector-overview" id="inspectorOverview"><div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div></div></section>
-          <section class="inspector-panel" data-inspector-panel="output"><div class="log-toolbar"><input id="logSearch" type="search" placeholder="搜索输出" aria-label="搜索任务输出" /><label><input id="logFollow" type="checkbox" checked /> 自动跟随</label></div><pre class="terminal" id="taskOutput">No task selected.</pre></section>
-          <section class="inspector-panel" data-inspector-panel="verification"><div class="verification" id="verificationResult"><p class="empty">尚无验收结果。</p></div></section>
-          <section class="inspector-panel" data-inspector-panel="review"><div class="review-head"><span>冲突审查</span><span class="status-pill" id="reviewState">CLEAR</span></div><div id="reviewContent" class="review-content"><p class="empty">没有等待处理的冲突。</p></div></section>
+          <div class="context-tabs" data-context-tabs role="tablist" aria-label="上下文视图">
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-context-tab="discussion">讨论</button>
+            <button class="active" type="button" role="tab" aria-selected="true" data-context-tab="task">任务详情</button>
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-context-tab="acceptance">验收</button>
+          </div>
+          <div class="context-dock-viewport" id="contextDockViewport" data-context-viewport>
+            <section class="context-panel" data-context-panel="discussion" hidden>
+              <section class="group-console context-group-console" id="groupConsole" data-active-pane="chat" aria-labelledby="groupConsoleTitle" hidden>
+                <div class="section-head group-console-head"><div><p class="kicker">GROUP SESSION</p><h2 id="groupConsoleTitle">群组讨论</h2></div><div class="group-console-heading-meta"><span class="status-pill" id="groupConsoleStatus">IDLE</span><button class="icon-button" id="closeGroupConsole" type="button" aria-label="关闭群组讨论" title="关闭">×</button></div></div>
+                <div class="group-console-grid">
+                  <section class="group-pane group-members-pane" aria-labelledby="groupMembersTitle"><div class="group-pane-head"><div><p class="kicker">ROSTER</p><h3 id="groupMembersTitle">成员与并发</h3></div><span id="groupConcurrency">0 / 0</span></div><div class="group-members" id="groupMembers"><p class="empty">选择会话后显示成员。</p></div></section>
+                  <section class="group-pane group-chat-pane" aria-labelledby="groupMessagesTitle"><div class="group-pane-head"><div><p class="kicker">DISCUSSION</p><h3 id="groupMessagesTitle">消息时间线</h3></div><span id="groupRound">ROUND 0 / 0</span></div><div class="group-messages" id="groupMessages" aria-live="polite"><p class="empty">会话尚未产生消息。</p></div><form class="group-message-form" id="groupMessageForm"><input id="groupMessageInput" name="content" maxlength="4000" autocomplete="off" aria-label="操作者消息，下一轮生效" placeholder="补充约束（下一轮生效）" /><button class="secondary" type="submit">发送</button></form></section>
+                  <aside class="group-pane group-control-pane" aria-labelledby="groupControlsTitle"><div class="group-pane-head"><div><p class="kicker">CONTROL</p><h3 id="groupControlsTitle">会话控制</h3></div></div><div class="group-session-meta" id="groupSessionMeta"><p class="empty">没有打开的群组会话。</p></div><div class="group-session-controls" id="groupSessionControls"></div></aside>
+                </div>
+                <section class="group-consensus" id="groupConsensus" aria-labelledby="groupConsensusTitle"><div class="group-consensus-head"><div><p class="kicker">CONSENSUS / DAG</p><h3 id="groupConsensusTitle">共识与任务拓扑</h3></div></div><div id="groupConsensusContent"><p class="empty">讨论结束后生成可确认的执行 DAG。</p></div></section>
+              </section>
+              <div class="context-empty" id="discussionEmpty"><span>DISCUSSION</span><strong>选择一个群组会话</strong><p>成员回合、消息和共识会在这里持续更新。</p></div>
+            </section>
+            <section class="context-panel active" data-context-panel="task">
+              <div class="inspector-tabs" role="tablist" aria-label="任务详情视图"><button class="active" type="button" role="tab" aria-selected="true" data-inspector-tab="overview">概览</button><button type="button" role="tab" aria-selected="false" data-inspector-tab="output">实时输出</button></div>
+              <section class="inspector-panel active" data-inspector-panel="overview"><div class="inspector-overview" id="inspectorOverview"><div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div></div></section>
+              <section class="inspector-panel" data-inspector-panel="output"><div class="log-toolbar"><input id="logSearch" type="search" placeholder="搜索输出" aria-label="搜索任务输出" /><label><input id="logFollow" type="checkbox" checked /> 自动跟随</label></div><pre class="terminal" id="taskOutput">No task selected.</pre></section>
+            </section>
+            <section class="context-panel acceptance-context" data-context-panel="acceptance" hidden>
+              <section class="acceptance-block"><div class="context-section-head"><span>ACCEPTANCE</span><strong>验收结果</strong></div><div class="verification" id="verificationResult"><p class="empty">尚无验收结果。</p></div></section>
+              <section class="acceptance-block"><div class="review-head"><span>冲突审查</span><span class="status-pill" id="reviewState">CLEAR</span></div><div id="reviewContent" class="review-content"><p class="empty">没有等待处理的冲突。</p></div></section>
+            </section>
+          </div>
         </div>
       </aside>
     </div>

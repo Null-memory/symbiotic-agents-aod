@@ -25,6 +25,16 @@ const configExample = JSON.parse(configExampleText);
 for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'inspectorResizeHandle']) {
   assert.equal(html.includes(`id="${id}"`), true, `Desktop shell is missing #${id}.`);
 }
+for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCount', 'contextDockViewport']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Adaptive workbench is missing #${id}.`);
+}
+for (const tab of ['discussion', 'task', 'acceptance']) {
+  assert.equal(html.includes(`data-context-tab="${tab}"`), true, `Context dock is missing the ${tab} tab.`);
+  assert.equal(html.includes(`data-context-panel="${tab}"`), true, `Context dock is missing the ${tab} panel.`);
+}
+for (const section of ['metrics', 'process', 'approval', 'agent-health', 'run-overview']) {
+  assert.equal(html.includes(`operational-disclosure ${section}-section`), true, `The ${section} area must be collapsible.`);
+}
 for (const view of ['runs', 'groups', 'tasks', 'delivery']) {
   assert.equal(html.includes(`data-view-panel="${view}"`), true, `Desktop shell is missing the ${view} view.`);
 }
@@ -39,6 +49,11 @@ assert.equal(shellCss.includes('.is-view-mode-all .workspace-view'), true, 'Cont
 assert.match(html, /<script\s+type="module"\s+src="app\.js"><\/script>/);
 assert.match(shellCss, /--inspector-width/);
 assert.match(shellCss, /grid-template-columns:[^;]*var\(--inspector-width\)/);
+assert.equal(tokensCss.includes('--motion-tab:160ms'), true, 'Context tab motion must use the approved fast timing.');
+assert.equal(tokensCss.includes('--motion-open:200ms'), true, 'Context opening must complete in 200ms.');
+assert.equal(tokensCss.includes('--motion-close:160ms'), true, 'Context closing must complete in 160ms.');
+assert.equal(shellCss.includes('52px'), true, 'Collapsed context dock must retain a 52px reopen rail.');
+assert.equal(shellCss.includes('.is-discussion-context'), true, 'Discussion context needs a dedicated dark surface.');
 assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.summary-grid\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.topbar-context\{display:none\}/);
 assert.equal(layoutModule.includes('createContextDock'), true, 'Layout must delegate inspector behavior to the shared context dock.');

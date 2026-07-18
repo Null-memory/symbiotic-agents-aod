@@ -20,8 +20,11 @@
   --radius-panel:8px;
   --radius-control:6px;
   --shadow-float:0 14px 34px rgba(24,36,40,.14);
-  --motion-fast:140ms;
-  --motion-layout:240ms;
+  --motion-fast:120ms;
+  --motion-tab:160ms;
+  --motion-open:200ms;
+  --motion-close:160ms;
+  --motion-layout:200ms;
   --nav-width:208px;
   --inspector-width:360px;
   --font-ui:Bahnschrift,"Microsoft YaHei UI","PingFang SC",sans-serif;

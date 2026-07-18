@@ -15,3 +15,13 @@ dialog{width:min(680px,calc(100vw - 40px));max-height:calc(100vh - 40px);overflo
 @keyframes surface-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
 @media(hover:hover){button:hover{transform:translateY(-1px);box-shadow:0 5px 12px rgba(24,36,40,.1)}.nav-item:hover,.inspector-tabs button:hover,.mode-switch button:hover{transform:none;box-shadow:none}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+.pending-action-button{display:flex;align-items:center;gap:6px;min-width:74px;height:32px;min-height:32px;padding:0 8px;border-color:#efd3ce;background:#fff5f3;color:var(--command);font-size:9px}.pending-action-button strong{display:grid;min-width:18px;height:18px;place-items:center;border-radius:999px;background:var(--command);color:#fff;font:8px var(--font-mono)}
+.context-tabs{position:relative;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:3px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface-subtle)}
+.context-tabs button{min-width:0;min-height:31px;padding:0 6px;border:0;background:transparent;font-size:10px;box-shadow:none;transform:none;transition:background var(--motion-tab),color var(--motion-tab)}
+.context-tabs button.active{background:var(--surface-live);color:var(--text-on-dark)}
+.is-discussion-context .context-tabs{border-color:#354548;background:#111b1d}.is-discussion-context .context-tabs button{color:#91a5a8}.is-discussion-context .context-tabs button.active{background:var(--accent-bright);color:#102123}
+.context-empty{display:grid;min-height:280px;place-content:center;padding:24px;text-align:center}.context-empty span{color:var(--accent-bright);font:9px var(--font-mono)}.context-empty strong{margin-top:8px;font-size:15px}.context-empty p{max-width:260px;margin:8px auto 0;color:#91a5a8;font-size:10px;line-height:1.6}
+.context-section-head{display:grid;gap:3px;margin-bottom:10px}.context-section-head span{color:var(--accent);font:8px var(--font-mono)}.context-section-head strong{font-size:12px}
+.acceptance-block{padding:12px 0;border-bottom:1px solid var(--border)}.acceptance-block:first-child{padding-top:0}.acceptance-block:last-child{border-bottom:0}
+.command-search-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer}.command-search-option:last-child{border:0}.command-search-option.active{background:var(--surface-accent)}.command-search-option strong{font-size:11px}.command-search-option span{color:var(--text-muted);font:8px var(--font-mono)}
