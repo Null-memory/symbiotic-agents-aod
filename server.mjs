@@ -9,6 +9,7 @@ import { buildApprovalInbox } from './approval-domain.mjs';
 import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { buildProcessMetrics, classifyInterruptedProcess } from './process-domain.mjs';
+import { requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
@@ -58,6 +59,21 @@ db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS project_workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    path_key TEXT NOT NULL UNIQUE,
+    git_root TEXT NOT NULL,
+    head_commit TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    status TEXT NOT NULL,
+    last_error TEXT,
+    is_dirty INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_selected_at TEXT
+  );
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -280,12 +296,16 @@ function ensureColumn(table, column, definition) {
 }
 ensureColumn('tasks', 'run_id', 'TEXT REFERENCES runs(id)');
 ensureColumn('events', 'run_id', 'TEXT REFERENCES runs(id)');
+for (const table of ['plans', 'runs', 'tasks', 'group_sessions', 'events', 'agent_processes']) {
+  ensureColumn(table, 'workspace_id', 'TEXT REFERENCES project_workspaces(id)');
+}
 
 setDefault('run_mode', 'hybrid');
 setDefault('max_concurrency', '3');
 setDefault('integration_branch', 'main');
 setDefault('worktree_retention_hours', '72');
 setDefault('last_backup_at', '');
+setDefault('active_workspace_id', '');
 
 function setDefault(key, value) {
   db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)').run(key, value);
@@ -297,6 +317,36 @@ function getSetting(key) { return db.prepare('SELECT value FROM settings WHERE k
 function setSetting(key, value) { db.prepare('INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value)); }
 function currentMode() { return getSetting('run_mode') || 'hybrid'; }
 function maxConcurrency() { return Math.max(1, Number(getSetting('max_concurrency') || 3)); }
+
+function workspaceFromRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    gitRoot: row.git_root,
+    headCommit: row.head_commit,
+    dirty: Boolean(row.is_dirty),
+    lastError: row.last_error,
+    lastSelectedAt: row.last_selected_at,
+  };
+}
+
+function listWorkspaces() {
+  return db.prepare('SELECT * FROM project_workspaces ORDER BY COALESCE(last_selected_at, created_at) DESC').all().map(workspaceFromRow);
+}
+
+function getWorkspace(id) {
+  return workspaceFromRow(db.prepare('SELECT * FROM project_workspaces WHERE id = ?').get(id));
+}
+
+function requireWorkspace(id) {
+  const workspace = getWorkspace(id);
+  if (!workspace) throw Object.assign(new Error(`Workspace ${id} was not found.`), { code: 'WORKSPACE_NOT_FOUND' });
+  return workspace;
+}
+
+function activeWorkspace() {
+  return requireWorkspace(getSetting('active_workspace_id'));
+}
 
 function taskFromRow(row) {
   if (!row) return null;
@@ -692,10 +742,6 @@ function recoverInterruptedTasks() {
   }
 }
 
-importLegacyState();
-recoverInterruptedAgentProcesses();
-recoverInterruptedTasks();
-
 async function exists(path) { try { await stat(path); return true; } catch { return false; } }
 function slug(value) { return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 36) || 'task'; }
 function cleanPaths(files) {
@@ -769,6 +815,167 @@ function runShell(command, cwd, timeoutMs) {
 async function git(args, cwd = root, timeoutMs) { return run('git', args, cwd, timeoutMs); }
 async function gitReady() { try { await git(['rev-parse', '--is-inside-work-tree']); await git(['rev-parse', '--verify', 'HEAD']); return true; } catch { return false; } }
 async function gitClean(cwd = root) { return (await git(['status', '--porcelain'], cwd)).stdout.trim() === ''; }
+
+function workspaceError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+async function validateWorkspacePath(value) {
+  let requestedPath;
+  try {
+    requestedPath = requireAbsoluteDirectoryPath(value);
+  } catch (error) {
+    const code = /absolute/i.test(error.message) ? 'WORKSPACE_PATH_NOT_ABSOLUTE' : 'WORKSPACE_PATH_REQUIRED';
+    throw workspaceError(code, error.message);
+  }
+  let details;
+  try {
+    details = await stat(requestedPath);
+  } catch {
+    throw workspaceError('WORKSPACE_PATH_UNAVAILABLE', `Workspace path is unavailable: ${requestedPath}`);
+  }
+  if (!details.isDirectory()) throw workspaceError('WORKSPACE_PATH_NOT_DIRECTORY', `Workspace path is not a directory: ${requestedPath}`);
+  let gitRoot;
+  try {
+    gitRoot = requireAbsoluteDirectoryPath((await git(['rev-parse', '--show-toplevel'], requestedPath)).stdout.trim());
+  } catch {
+    throw workspaceError('WORKSPACE_NOT_GIT_REPOSITORY', `The selected directory is not inside a Git repository: ${requestedPath}`);
+  }
+  const bare = (await git(['rev-parse', '--is-bare-repository'], gitRoot)).stdout.trim() === 'true';
+  if (bare) throw workspaceError('WORKSPACE_BARE_REPOSITORY', 'Bare Git repositories cannot be used as AOD workspaces.');
+  let headCommit;
+  try {
+    headCommit = (await git(['rev-parse', '--verify', 'HEAD'], gitRoot)).stdout.trim();
+  } catch {
+    throw workspaceError('WORKSPACE_HEAD_REQUIRED', 'The selected Git repository must contain at least one commit.');
+  }
+  const branchOutput = (await git(['branch', '--show-current'], gitRoot)).stdout.trim();
+  const status = (await git(['status', '--porcelain'], gitRoot)).stdout.replace(/\r\n/g, '\n').replace(/\n$/, '');
+  const pathKey = workspacePathKey(gitRoot);
+  return {
+    valid: true,
+    requestedPath,
+    gitRoot,
+    pathKey,
+    name: basename(gitRoot),
+    headCommit,
+    branch: branchOutput || 'detached HEAD',
+    detached: !branchOutput,
+    dirty: status.length > 0,
+    status,
+    duplicateWorkspaceId: db.prepare('SELECT id FROM project_workspaces WHERE path_key = ?').get(pathKey)?.id || null,
+  };
+}
+
+function saveWorkspaceValidation(id, validation, { selected = false } = {}) {
+  const updatedAt = now();
+  db.prepare(`UPDATE project_workspaces SET name = ?, path = ?, path_key = ?, git_root = ?, head_commit = ?, branch = ?,
+    status = 'ready', last_error = NULL, is_dirty = ?, updated_at = ?, last_selected_at = CASE WHEN ? THEN ? ELSE last_selected_at END
+    WHERE id = ?`).run(
+    validation.name, validation.gitRoot, validation.pathKey, validation.gitRoot, validation.headCommit, validation.branch,
+    validation.dirty ? 1 : 0, updatedAt, selected ? 1 : 0, updatedAt, id
+  );
+  return getWorkspace(id);
+}
+
+function nextWorkspaceId() {
+  const used = new Set(db.prepare('SELECT id FROM project_workspaces').all().map(row => row.id));
+  let number = used.size + 1;
+  while (used.has(`WS-${String(number).padStart(3, '0')}`)) number += 1;
+  return `WS-${String(number).padStart(3, '0')}`;
+}
+
+async function initializeWorkspaceRegistry() {
+  const validation = await validateWorkspacePath(root);
+  const existing = db.prepare('SELECT id FROM project_workspaces WHERE path_key = ?').get(validation.pathKey);
+  const id = existing?.id || 'WS-001';
+  const createdAt = now();
+  if (!existing) {
+    if (db.prepare('SELECT id FROM project_workspaces WHERE id = ?').get(id)) {
+      throw workspaceError('WORKSPACE_MIGRATION_CONFLICT', `${id} is already assigned to another repository.`);
+    }
+    db.prepare(`INSERT INTO project_workspaces(
+      id, name, path, path_key, git_root, head_commit, branch, status, is_dirty, created_at, updated_at, last_selected_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)`).run(
+      id, validation.name, validation.gitRoot, validation.pathKey, validation.gitRoot, validation.headCommit, validation.branch,
+      validation.dirty ? 1 : 0, createdAt, createdAt, createdAt
+    );
+  } else {
+    saveWorkspaceValidation(id, validation);
+  }
+  db.exec('BEGIN');
+  try {
+    for (const table of ['plans', 'runs', 'tasks', 'group_sessions', 'events', 'agent_processes']) {
+      db.prepare(`UPDATE ${table} SET workspace_id = ? WHERE workspace_id IS NULL OR workspace_id = ''`).run(id);
+    }
+    if (!getSetting('active_workspace_id') || !getWorkspace(getSetting('active_workspace_id'))) setSetting('active_workspace_id', id);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+async function registerWorkspace(value) {
+  const validation = await validateWorkspacePath(value);
+  if (validation.duplicateWorkspaceId) return { ...saveWorkspaceValidation(validation.duplicateWorkspaceId, validation), duplicate: true };
+  const id = nextWorkspaceId();
+  const createdAt = now();
+  db.prepare(`INSERT INTO project_workspaces(
+    id, name, path, path_key, git_root, head_commit, branch, status, is_dirty, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)`).run(
+    id, validation.name, validation.gitRoot, validation.pathKey, validation.gitRoot, validation.headCommit,
+    validation.branch, validation.dirty ? 1 : 0, createdAt, createdAt
+  );
+  appendEvent('workspace', `${id} registered for ${validation.gitRoot}`);
+  return { ...getWorkspace(id), duplicate: false };
+}
+
+async function selectWorkspace(id) {
+  const workspace = requireWorkspace(id);
+  let validation;
+  try {
+    validation = await validateWorkspacePath(workspace.git_root);
+  } catch (error) {
+    db.prepare("UPDATE project_workspaces SET status = 'unavailable', last_error = ?, updated_at = ? WHERE id = ?")
+      .run(error.message, now(), id);
+    throw error;
+  }
+  const selected = saveWorkspaceValidation(id, validation, { selected: true });
+  setSetting('active_workspace_id', id);
+  appendEvent('workspace_selected', `${id} selected`);
+  broadcast('workspace', { activeWorkspaceId: id, workspace: selected, at: now() });
+  return selected;
+}
+
+async function browseDirectories(value) {
+  let directory;
+  try {
+    directory = requireAbsoluteDirectoryPath(value);
+  } catch (error) {
+    throw workspaceError(/absolute/i.test(error.message) ? 'WORKSPACE_PATH_NOT_ABSOLUTE' : 'WORKSPACE_PATH_REQUIRED', error.message);
+  }
+  let entries;
+  try {
+    const details = await stat(directory);
+    if (!details.isDirectory()) throw workspaceError('WORKSPACE_PATH_NOT_DIRECTORY', `Path is not a directory: ${directory}`);
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (String(error?.code || '').startsWith('WORKSPACE_')) throw error;
+    throw workspaceError('WORKSPACE_PATH_UNAVAILABLE', `Directory cannot be read: ${directory}`);
+  }
+  return {
+    path: directory,
+    parent: dirname(directory) === directory ? null : dirname(directory),
+    directories: entries.filter(entry => entry.isDirectory()).map(entry => ({ name: entry.name, path: join(directory, entry.name) }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  };
+}
+
+importLegacyState();
+await initializeWorkspaceRegistry();
+recoverInterruptedAgentProcesses();
+recoverInterruptedTasks();
 
 async function loadConfig() {
   if (!(await exists(configPath))) return { agents: {}, defaults: {} };
@@ -2017,6 +2224,7 @@ async function executeApprovalAction(payload) {
 function publicState() {
   const tasks = listTasks();
   const runs = listRuns();
+  const selectedWorkspace = activeWorkspace();
   const groups = listGroups();
   const reviews = listReviews();
   const metrics = processMetrics();
@@ -2027,7 +2235,8 @@ function publicState() {
     recovery_note: session.recovery_note, created_at: session.created_at, updated_at: session.updated_at
   }));
   return {
-    workspace: basename(root), mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
+    workspace: selectedWorkspace.name, activeWorkspaceId: selectedWorkspace.id, workspaces: listWorkspaces(),
+    mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
     agents, agentHealth: listAgentHealth(), approvals: buildApprovalInbox({ tasks, runs, reviews, groupSessions }), metrics, statuses, transitions, tasks, runs, groups, groupSessions, reviews,
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
     runtime: {
@@ -2055,6 +2264,20 @@ async function api(request, response, url) {
     request.on('close', () => { clearInterval(keepAlive); eventStreams.delete(response); });
     return;
   }
+  if (request.method === 'GET' && url.pathname === '/api/workspaces') {
+    return send(response, 200, { activeWorkspaceId: getSetting('active_workspace_id'), workspaces: listWorkspaces() });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/filesystem/directories') {
+    return send(response, 200, await browseDirectories(url.searchParams.get('path')));
+  }
+  if (request.method === 'POST' && url.pathname === '/api/workspaces/validate') {
+    return send(response, 200, await validateWorkspacePath((await body(request)).path));
+  }
+  if (request.method === 'POST' && url.pathname === '/api/workspaces') {
+    return send(response, 201, await registerWorkspace((await body(request)).path));
+  }
+  const workspaceSelectMatch = url.pathname.match(/^\/api\/workspaces\/(WS-\d+)\/select$/);
+  if (workspaceSelectMatch && request.method === 'POST') return send(response, 200, await selectWorkspace(workspaceSelectMatch[1]));
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
   if (request.method === 'GET' && url.pathname === '/api/processes') return send(response, 200, listAgentProcesses({ limit: url.searchParams.get('limit'), runId: url.searchParams.get('runId') }));
   if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, processMetrics({ from: url.searchParams.get('from'), to: url.searchParams.get('to'), runId: url.searchParams.get('runId') }));
@@ -2226,7 +2449,10 @@ createServer(async (request, response) => {
     if (url.pathname.startsWith('/api/')) await api(request, response, url);
     else await staticFile(response, url.pathname);
   } catch (error) {
-    send(response, 400, { error: error instanceof Error ? error.message : 'Unexpected error.' });
+    send(response, 400, {
+      error: error instanceof Error ? error.message : 'Unexpected error.',
+      ...(error?.code ? { code: error.code } : {}),
+    });
   }
 }).listen(port, '127.0.0.1', () => console.log(`AOD console is available at http://127.0.0.1:${port}`));
 
