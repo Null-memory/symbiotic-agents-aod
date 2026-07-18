@@ -7,6 +7,7 @@ import { createDialogs } from './ui/dialogs.js';
 import { buildSearchIndex, searchEntities } from './ui/command-search.js';
 import { createActionState } from './ui/action-feedback.js';
 import { deriveNextAction, deriveRunStage } from './ui/run-stage.js';
+import { captureElementState, createRefreshScheduler, restoreElementState } from './ui/render-scheduler.js';
 
 const $ = selector => document.querySelector(selector);
 const board = $('#taskBoard');
@@ -40,7 +41,6 @@ let state = null;
 let selectedTaskId = null;
 let noticeTimer;
 let plannedRun = null;
-let refreshTimer;
 let editingGroupId = null;
 let selectedGroupId = null;
 let selectedGroupSessionId = null;
@@ -644,20 +644,31 @@ async function openGroupSession(sessionId, groupId = null) {
   await refreshSelectedGroupSession(true);
 }
 
-async function refresh() {
+async function refresh({ includeGithub = true } = {}) {
   try {
-    const [nextState, health, github] = await Promise.all([request('/api/state'), request('/api/health'), request('/api/github/status').catch(error => ({ error: error.message }))]);
+    const [nextState, health, github] = await Promise.all([request('/api/state'), request('/api/health'), includeGithub ? request('/api/github/status').catch(error => ({ error: error.message })) : Promise.resolve(null)]);
     render(nextState, health);
-    const login = github.login;
-    $('#githubStatus').textContent = github.authenticated ? `GitHub 已连接${github.remote ? ' / origin 已配置' : ' / 未配置远程'}` : login?.pending ? (login.deviceCode ? `GitHub code: ${login.deviceCode}` : 'GitHub authorization is starting...') : github.available ? 'GitHub 未认证，点击连接' : 'GitHub CLI 未安装';
-    $('#githubStatus').title = login?.deviceUrl || '';
-    $('#githubStatus').classList.toggle('warning', !github.authenticated);
+    if (github) {
+      const login = github.login;
+      $('#githubStatus').textContent = github.authenticated ? `GitHub 已连接${github.remote ? ' / origin 已配置' : ' / 未配置远程'}` : login?.pending ? (login.deviceCode ? `GitHub code: ${login.deviceCode}` : 'GitHub authorization is starting...') : github.available ? 'GitHub 未认证，点击连接' : 'GitHub CLI 未安装';
+      $('#githubStatus').title = login?.deviceUrl || '';
+      $('#githubStatus').classList.toggle('warning', !github.authenticated);
+    }
     if (selectedGroupSessionId) await refreshSelectedGroupSession();
   }
   catch (error) { tell(error.message, 'error'); }
 }
 
-function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 120); }
+async function refreshFromStream(types) {
+  const workspaceSnapshot = captureElementState($('#workspaceMain'));
+  const dockSnapshot = captureElementState($('#contextDockViewport'), '#groupMessageInput', document.activeElement);
+  if (types.length && types.every(type => type === 'group_message') && selectedGroupSessionId) await refreshSelectedGroupSession();
+  else await refresh({ includeGithub: false });
+  restoreElementState($('#workspaceMain'), null, workspaceSnapshot);
+  restoreElementState($('#contextDockViewport'), '#groupMessageInput', dockSnapshot);
+}
+
+const streamRefresh = createRefreshScheduler(refreshFromStream, { delay: 100, onError: error => tell(error.message, 'error') });
 
 const groupMemberDefaults = {
   codex: { role: 'executor', displayName: 'Codex 执行', instructions: '拆解方案并负责实现与提交。' },
@@ -1115,7 +1126,7 @@ $('#reviewContent').addEventListener('click', async event => {
 
 refresh();
 connectStream({
-  onEvent: scheduleRefresh,
+  onEvent: type => streamRefresh.schedule(type),
   onConnection(status) {
     $('#streamState').textContent = status === 'online' ? '实时连接' : '正在重连';
     $('#appNav').classList.toggle('is-reconnecting', status !== 'online');

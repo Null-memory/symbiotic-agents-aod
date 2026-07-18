@@ -36,8 +36,8 @@ test('captures and restores input and scroll state', () => {
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   };
   const root = { scrollTop: 88, querySelector: selector => selector === '#message' ? input : null };
-  const snapshot = captureElementState(root, '#message');
-  assert.deepEqual(snapshot, { scrollTop: 88, input: { id: 'message', value: 'draft', selectionStart: 2, selectionEnd: 4 } });
+  const snapshot = captureElementState(root, '#message', input);
+  assert.deepEqual(snapshot, { scrollTop: 88, input: { id: 'message', value: 'draft', selectionStart: 2, selectionEnd: 4, focused: true } });
 
   root.scrollTop = 0;
   input.value = '';
@@ -46,4 +46,14 @@ test('captures and restores input and scroll state', () => {
   assert.equal(input.value, 'draft');
   assert.equal(input.focusCalled, true);
   assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 4]);
+});
+
+test('does not steal focus when the preserved input was inactive', () => {
+  const input = { id: 'message', value: 'draft', focusCalled: false, focus() { this.focusCalled = true; } };
+  const other = { id: 'search' };
+  const root = { scrollTop: 12, querySelector: () => input };
+  const snapshot = captureElementState(root, '#message', other);
+  restoreElementState(root, '#message', snapshot, callback => callback());
+  assert.equal(snapshot.input.focused, false);
+  assert.equal(input.focusCalled, false);
 });

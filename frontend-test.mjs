@@ -102,6 +102,9 @@ assert.equal(script.includes('groupConsole.scrollIntoView'), false, 'Opening dis
 assert.equal(script.includes('buildSearchIndex'), true, 'Global command search must index the current public state.');
 assert.equal(script.includes('deriveRunStage'), true, 'The stage bar must derive state from persisted run data.');
 assert.equal(script.includes('createActionState'), true, 'Async controls must expose durable inline feedback.');
+assert.equal(script.includes('createRefreshScheduler'), true, 'SSE events must use the coalesced refresh scheduler.');
+assert.equal(script.includes('captureElementState'), true, 'Live refreshes must preserve dock input and scroll state.');
+assert.equal(script.includes('refreshTimer'), false, 'The legacy ad hoc refresh timer must be removed.');
 
 assert.match(css, /@media\s*\(max-width:560px\)[\s\S]*?\.group-mobile-tabs\s*\{[^}]*display:flex/);
 assert.equal(css.includes('[data-active-pane="chat"] [data-mobile-pane]:not([data-mobile-pane="chat"])'), true);

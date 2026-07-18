@@ -48,7 +48,7 @@ export function createRefreshScheduler(refresh, { delay = 100, onError = error =
   return { schedule, flush, cancel };
 }
 
-export function captureElementState(root, inputSelector) {
+export function captureElementState(root, inputSelector, activeElement = undefined) {
   const input = inputSelector ? root?.querySelector?.(inputSelector) : null;
   return {
     scrollTop: Number(root?.scrollTop) || 0,
@@ -56,7 +56,8 @@ export function captureElementState(root, inputSelector) {
       id: input.id || null,
       value: input.value ?? '',
       selectionStart: Number.isInteger(input.selectionStart) ? input.selectionStart : null,
-      selectionEnd: Number.isInteger(input.selectionEnd) ? input.selectionEnd : null
+      selectionEnd: Number.isInteger(input.selectionEnd) ? input.selectionEnd : null,
+      focused: activeElement === undefined ? true : activeElement === input
     } : null
   };
 }
@@ -69,7 +70,7 @@ export function restoreElementState(root, inputSelector, snapshot, frame = callb
     const input = root.querySelector?.(inputSelector);
     if (!input) return;
     input.value = snapshot.input.value;
-    input.focus?.({ preventScroll: true });
+    if (snapshot.input.focused) input.focus?.({ preventScroll: true });
     if (snapshot.input.selectionStart !== null && snapshot.input.selectionEnd !== null) {
       input.setSelectionRange?.(snapshot.input.selectionStart, snapshot.input.selectionEnd);
     }
