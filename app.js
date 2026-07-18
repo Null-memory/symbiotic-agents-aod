@@ -2,7 +2,7 @@ import { request, connectStream } from './ui/api.js';
 import { createStore } from './ui/state.js';
 import { createLayout } from './ui/layout.js';
 import { createRunCenter } from './ui/run-center.js';
-import { createGroupConsole } from './ui/group-console.js';
+import { buildGroupTimelineItems, createGroupConsole } from './ui/group-console.js';
 import { createDialogs } from './ui/dialogs.js';
 import { createWorkspaceController } from './ui/workspaces.js';
 import { buildSearchIndex, searchEntities } from './ui/command-search.js';
@@ -442,11 +442,26 @@ function renderGroupMembers() {
 function renderGroupMessages() {
   const container = $('#groupMessages');
   const stickToBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 90;
-  if (!groupMessages.length) container.innerHTML = '<p class="empty">会话尚未产生消息。</p>';
-  else container.innerHTML = groupMessages.map(message => `<div class="group-message ${message.sender_kind === 'operator' ? 'operator' : 'member'}">
-    <div class="group-message-meta"><strong>${escapeHtml(message.sender_kind === 'operator' ? '操作者' : memberName(message.sender_member_id))}</strong><span>R${message.round} / ${escapeHtml(message.phase)}</span><time>${formatTime(message.at)}</time></div>
-    <div class="group-message-content">${escapeHtml(message.content)}</div>
-  </div>`).join('');
+  const timelineItems = buildGroupTimelineItems({ messages: groupMessages, turns: selectedGroupSession?.turns || [] });
+  if (!timelineItems.length) {
+    const emptyCopy = selectedGroupSession?.status === 'draft' ? '讨论尚未启动。' : '正在准备讨论回合…';
+    container.innerHTML = `<p class="empty">${emptyCopy}</p>`;
+  } else container.innerHTML = timelineItems.map(item => {
+    if (item.kind === 'message') return `<div class="group-message ${item.sender_kind === 'operator' ? 'operator' : 'member'}">
+      <div class="group-message-meta"><strong>${escapeHtml(item.sender_kind === 'operator' ? '操作者' : memberName(item.sender_member_id))}</strong><span>R${item.round} / ${escapeHtml(item.phase)}</span><time>${formatTime(item.at)}</time></div>
+      <div class="group-message-content">${escapeHtml(item.content)}</div>
+    </div>`;
+    const statusCopy = {
+      queued: '正在等待可用的 Agent 并发槽位。',
+      running: '正在生成本轮内容，完成后将在这里显示完整回复。',
+      recovery_required: '本回合需要人工恢复确认。'
+    }[item.status] || statusLabel(item.status);
+    return `<div class="group-message group-turn-progress status-${escapeHtml(item.status)}">
+      <div class="group-message-meta"><strong>${escapeHtml(memberName(item.senderMemberId))}</strong><span>R${item.round} / ${escapeHtml(item.phase)}</span><time>${formatDuration(item.elapsedMs)}</time></div>
+      <div class="group-message-content">${escapeHtml(statusCopy)}</div>
+      <small>CLI 可能在退出前缓冲输出；回合状态仍会持续保留。</small>
+    </div>`;
+  }).join('');
   if (stickToBottom) container.scrollTop = container.scrollHeight;
 }
 

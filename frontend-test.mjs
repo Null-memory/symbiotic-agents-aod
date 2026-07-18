@@ -71,6 +71,9 @@ assert.equal(contextDockModule.includes('aria-valuenow'), true, 'The context doc
 assert.equal(apiModule.includes('Last-Event-ID'), true);
 assert.equal(runCenterModule.includes('createRunCenter'), true);
 assert.equal(groupConsoleModule.includes('createGroupConsole'), true);
+assert.equal(script.includes('buildGroupTimelineItems'), true, 'The message timeline must project active group turns before replies complete.');
+assert.equal(script.includes('正在生成本轮内容'), true, 'The message timeline must explain buffered CLI output while a turn is running.');
+assert.equal(viewsCss.includes('.group-turn-progress'), true, 'Active group turns need a visible timeline progress state.');
 assert.equal(dialogsModule.includes('createDialogs'), true);
 const streamEndpointSource = server.slice(server.indexOf("url.pathname === '/api/stream'"), server.indexOf("url.pathname === '/api/state'"));
 const broadcastSource = server.slice(server.indexOf('function broadcast'), server.indexOf('function appendEvent'));
