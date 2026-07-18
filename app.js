@@ -4,6 +4,9 @@ import { createLayout } from './ui/layout.js';
 import { createRunCenter } from './ui/run-center.js';
 import { createGroupConsole } from './ui/group-console.js';
 import { createDialogs } from './ui/dialogs.js';
+import { buildSearchIndex, searchEntities } from './ui/command-search.js';
+import { createActionState } from './ui/action-feedback.js';
+import { deriveNextAction, deriveRunStage } from './ui/run-stage.js';
 
 const $ = selector => document.querySelector(selector);
 const board = $('#taskBoard');
@@ -46,6 +49,10 @@ let groupMessages = [];
 let groupMessagesAfter = 0;
 let groupDetailRequest = 0;
 let groupConsoleOpen = false;
+let commandIndex = [];
+let commandResults = [];
+let commandSelection = 0;
+let currentNextAction = null;
 
 const statusLabels = {
   draft: '草稿', preparing: '准备中', ready: '就绪', queued: '排队中', running: '运行中', discussing: '讨论中', paused: '已暂停', synthesizing: '汇总中', awaiting_confirmation: '待确认', executing: '执行中', awaiting_merge: '待合并', reviewing: '审查中', repairing: '修复中', verifying: '验证中', merge_ready: '待合并', merging: '合并中', conflict_review: '冲突审查', recovery_required: '恢复确认', completed: '已完成', passed: '已通过', pending: '等待中', skipped: '已跳过', failed: '失败', cancelled: '已取消', merged: '已合并'
@@ -57,6 +64,7 @@ const processKindCopy = { task: '独立任务', group_turn: '群组回合', role
 const processStatusCopy = { running: '运行中', succeeded: '已完成', failed: '失败', timed_out: '已超时', cancelled: '已取消', recovery_required: '需恢复' };
 const recoveryStateCopy = { live: '进程仍存活', stale: '进程已失联', unverifiable: '状态无法确认' };
 const store = createStore({ data: null, health: null, selection: {} });
+const actionFeedback = createActionState({ onChange: renderActionFeedback });
 const layout = createLayout({
   onRouteChange(route) {
     if (route.taskId) selectedTaskId = route.taskId;
@@ -68,7 +76,8 @@ const groupConsoleUi = createGroupConsole({ root: groupConsole });
 const dialogsUi = createDialogs();
 const runCenterUi = createRunCenter({
   root: $('#contextInspector'), request, tell, onRefresh: refresh, getSelectedTask: selectedTask,
-  onContext: (tab, taskId) => contextDock.open(tab, taskId)
+  onContext: (tab, taskId) => contextDock.open(tab, taskId),
+  executeAction: (action, operation) => withActionFeedback(`${action.dataset.id}:${action.dataset.action}`, `正在${action.textContent.trim()}`, '操作已完成', operation)
 });
 void dialogsUi;
 
@@ -89,13 +98,56 @@ function modeLabel(mode) { return { manual: '人工', hybrid: '混合', auto: '�
 function activeReview() { return state?.reviews.find(review => ['pending', 'running', 'suggested', 'failed'].includes(review.status)) || null; }
 function selectedTask() { return state?.tasks.find(task => task.id === selectedTaskId) || state?.tasks.find(task => ['running', 'verifying', 'conflict_review', 'merge_ready'].includes(task.status)) || state?.tasks[0] || null; }
 
+function selectedRun() {
+  const route = layout.getRoute();
+  const task = selectedTask();
+  return state?.runs.find(run => run.id === route.runId)
+    || state?.runs.find(run => run.id === task?.run_id)
+    || state?.runs.find(run => !['completed', 'archived'].includes(run.status))
+    || state?.runs[0]
+    || null;
+}
+
+function renderActionFeedback(key, value) {
+  document.querySelectorAll('[data-action-key]').forEach(button => {
+    if (button.dataset.actionKey !== key) return;
+    button.disabled = value?.status === 'pending';
+    let feedback = button.parentElement?.querySelector(`.action-feedback[data-feedback-key="${key}"]`);
+    if (!value) { feedback?.remove(); return; }
+    if (!feedback) {
+      feedback = document.createElement('span');
+      feedback.className = 'action-feedback';
+      feedback.dataset.feedbackKey = key;
+      button.parentElement?.append(feedback);
+    }
+    feedback.className = `action-feedback is-${value.status}`;
+    feedback.textContent = value.message;
+  });
+}
+
+function applyActionFeedback() {
+  for (const [key, value] of actionFeedback.entries()) renderActionFeedback(key, value);
+}
+
+async function withActionFeedback(key, pendingMessage, successMessage, operation) {
+  actionFeedback.start(key, pendingMessage);
+  try {
+    const result = await operation();
+    actionFeedback.succeed(key, successMessage);
+    return result;
+  } catch (error) {
+    actionFeedback.fail(key, error);
+    throw error;
+  }
+}
+
 function taskActions(task) {
   const actions = [];
-  if (task.status === 'draft') actions.push(`<button class="small primary" data-action="prepare" data-id="${task.id}">准备 worktree</button>`);
-  if (task.status === 'ready') actions.push(`<button class="small primary" data-action="start" data-id="${task.id}">启动 Agent</button>`);
-  if (task.status === 'verifying') actions.push(`<button class="small primary" data-action="verify" data-id="${task.id}">运行验收</button>`);
-  if (task.status === 'merge_ready') actions.push(`<button class="small primary" data-action="merge" data-id="${task.id}">合并分支</button>`);
-  if (task.status === 'conflict_review') actions.push(`<button class="small warn" data-action="review" data-id="${task.id}">请求审查建议</button>`);
+  if (task.status === 'draft') actions.push(`<button class="small primary" data-action="prepare" data-action-key="${task.id}:prepare" data-id="${task.id}">准备 worktree</button>`);
+  if (task.status === 'ready') actions.push(`<button class="small primary" data-action="start" data-action-key="${task.id}:start" data-id="${task.id}">启动 Agent</button>`);
+  if (task.status === 'verifying') actions.push(`<button class="small primary" data-action="verify" data-action-key="${task.id}:verify" data-id="${task.id}">运行验收</button>`);
+  if (task.status === 'merge_ready') actions.push(`<button class="small primary" data-action="merge" data-action-key="${task.id}:merge" data-id="${task.id}">合并分支</button>`);
+  if (task.status === 'conflict_review') actions.push(`<button class="small warn" data-action="review" data-action-key="${task.id}:review" data-id="${task.id}">请求审查建议</button>`);
   const next = state.transitions[task.status] || [];
   if (next.length) actions.push(`<select class="small secondary status-select" data-status="${task.id}" aria-label="更新 ${task.id} 状态"><option value="">更新状态</option>${next.map(value => `<option value="${value}">${statusLabel(value)}</option>`).join('')}</select>`);
   return actions.join('');
@@ -118,8 +170,8 @@ function renderRuns() {
   runsBoard.innerHTML = state.runs.map(run => {
     const tasks = state.tasks.filter(task => task.run_id === run.id);
     const merged = tasks.filter(task => task.status === 'merged').length;
-    const publish = run.status === 'ready_to_publish' ? `<button class="small primary" data-run-action="publish" data-run-id="${run.id}">发布 PR</button>` : '';
-    const refresh = run.github_pr_number ? `<button class="small secondary" data-run-action="refresh" data-run-id="${run.id}">刷新 CI</button>` : '';
+    const publish = run.status === 'ready_to_publish' ? `<button class="small primary" data-action-key="run:${run.id}:publish" data-run-action="publish" data-run-id="${run.id}">发布 PR</button>` : '';
+    const refresh = run.github_pr_number ? `<button class="small secondary" data-action-key="run:${run.id}:refresh" data-run-action="refresh" data-run-id="${run.id}">刷新 CI</button>` : '';
     return `<article class="run-card status-${run.status}"><div class="task-meta"><span>${run.id}</span><span>${modeLabel(run.mode)}</span></div><h3>${escapeHtml(run.title)}</h3><p>${escapeHtml(run.requirement)}</p><div class="run-meta"><span>${merged}/${tasks.length} 已合并</span><span>${escapeHtml(run.integration_branch)}</span><span>CI: ${escapeHtml(run.ci_status)}</span></div><div class="task-foot"><strong>${escapeHtml(run.status)}</strong><div>${publish}${refresh}${run.github_pr_url ? `<a class="small secondary" href="${escapeHtml(run.github_pr_url)}" target="_blank" rel="noreferrer">打开 PR</a>` : ''}</div></div></article>`;
   }).join('');
 }
@@ -169,7 +221,7 @@ function renderApprovals() {
     const actions = item.actions.map(action => {
       if (action === 'external') return `<a class="small secondary" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">打开 GitHub</a>`;
       if (action === 'open') return `<button class="small secondary" type="button" data-approval-open="${escapeHtml(item.id)}">${actionCopy[action]}</button>`;
-      return `<button class="small ${item.risk === 'high' ? 'warn' : 'primary'}" type="button" data-approval-action="${escapeHtml(action)}" data-approval-id="${escapeHtml(item.id)}">${actionCopy[action] || escapeHtml(action)}</button>`;
+      return `<button class="small ${item.risk === 'high' ? 'warn' : 'primary'}" type="button" data-action-key="approval:${escapeHtml(item.id)}:${escapeHtml(action)}" data-approval-action="${escapeHtml(action)}" data-approval-id="${escapeHtml(item.id)}">${actionCopy[action] || escapeHtml(action)}</button>`;
     }).join('');
     return `<article class="approval-row risk-${escapeHtml(item.risk)}">
       <div class="approval-kind"><span>${escapeHtml(kindCopy[item.kind] || item.kind)}</span><b>${escapeHtml(item.entityId)}</b></div>
@@ -178,6 +230,54 @@ function renderApprovals() {
       <div class="approval-actions">${actions}</div>
     </article>`;
   }).join('');
+}
+
+function renderRunCommand() {
+  const run = selectedRun();
+  const tasks = run ? state.tasks.filter(task => task.run_id === run.id) : [];
+  const approvals = (state.approvals || []).filter(item => !run || !item.runId || item.runId === run.id);
+  const stage = deriveRunStage(run, tasks, approvals);
+  $('#runStageBar').querySelectorAll('[data-stage]').forEach(element => {
+    const item = stage.stages.find(candidate => candidate.key === element.dataset.stage);
+    element.className = `run-stage is-${item?.state || 'upcoming'}`;
+    element.setAttribute('aria-current', item?.state === 'current' ? 'step' : 'false');
+  });
+  currentNextAction = deriveNextAction(run, approvals);
+  const passive = currentNextAction.kind === 'monitor';
+  $('#nextAction').innerHTML = `<div><span>NEXT ACTION${run ? ` / ${escapeHtml(run.id)}` : ''}</span><strong>${escapeHtml(currentNextAction.label)}</strong></div>${passive ? '<span class="next-action-passive">实时等待</span>' : `<button class="primary compact" type="button" data-next-action="${escapeHtml(currentNextAction.kind)}">打开</button>`}`;
+}
+
+function renderCommandResults() {
+  const root = $('#commandSearchResults');
+  if (!commandResults.length) {
+    root.innerHTML = '<p class="empty">没有匹配结果。</p>';
+    root.hidden = !$('#commandSearch').value.trim();
+    return;
+  }
+  const typeCopy = { run: '运行', task: '任务', group: '群组', session: '会话', adapter: 'Agent' };
+  root.innerHTML = commandResults.map((result, index) => `<button class="command-search-option ${index === commandSelection ? 'active' : ''}" type="button" role="option" aria-selected="${index === commandSelection}" data-command-result="${index}"><strong>${escapeHtml(result.title)}</strong><span>${escapeHtml(typeCopy[result.type] || result.type)} / ${escapeHtml(result.id)}</span><small>${escapeHtml(result.meta)}</small></button>`).join('');
+  root.hidden = false;
+}
+
+function refreshCommandIndex() {
+  commandIndex = buildSearchIndex({
+    runs: state.runs,
+    tasks: state.tasks,
+    groups: state.groups,
+    groupSessions: state.groupSessions,
+    adapters: state.agentHealth || state.agents
+  });
+}
+
+async function selectCommandResult(result) {
+  if (!result) return;
+  $('#commandSearch').value = '';
+  $('#commandSearchResults').hidden = true;
+  if (result.type === 'session') return openGroupSession(result.entityId, state.groupSessions.find(session => session.id === result.entityId)?.group_id);
+  if (result.contextTab) contextDock.open(result.contextTab, result.entityId);
+  layout.setRoute(result.route);
+  if (result.type === 'task') { selectedTaskId = result.entityId; renderBoard(); renderDetail(); }
+  if (result.type === 'adapter') document.querySelector('.agent-health-section')?.setAttribute('open', '');
 }
 
 function formatDuration(milliseconds) {
@@ -483,7 +583,7 @@ function render(nextState, health) {
   $('#conflictCount').textContent = state.approvals?.length || 0;
   $('#pendingActionCount strong').textContent = state.approvals?.length || 0;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
-  renderMetrics(); renderProcessMonitor(); renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+  renderMetrics(); renderProcessMonitor(); renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents(); renderRunCommand(); refreshCommandIndex(); applyActionFeedback();
 }
 
 async function openApprovalItem(item) {
@@ -686,6 +786,57 @@ $('#openTaskDialogFromTasks').addEventListener('click', () => dialog.showModal()
 $('#openRunDialog').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; runDialog.showModal(); });
 $('#openGroupDialog').addEventListener('click', () => openGroupEditor());
 $('#refresh').addEventListener('click', refresh);
+$('#pendingActionCount').addEventListener('click', () => {
+  layout.setRoute({ view: 'runs', runId: selectedRun()?.id || null });
+  document.querySelector('.approval-section')?.setAttribute('open', '');
+  document.querySelector('.approval-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+$('#nextAction').addEventListener('click', async event => {
+  if (!event.target.closest('[data-next-action]') || !currentNextAction) return;
+  if (currentNextAction.kind === 'create') return $('#openRunDialog').click();
+  const approval = state.approvals?.find(item => item.id === currentNextAction.id);
+  if (approval) {
+    if (approval.actions.includes('external') && approval.url) return window.open(approval.url, '_blank', 'noopener');
+    return openApprovalItem(approval);
+  }
+  const run = selectedRun();
+  if (!run) return;
+  const endpoint = currentNextAction.kind === 'publish' ? 'publish' : 'refresh';
+  try {
+    await withActionFeedback(`run:${run.id}:${endpoint}`, endpoint === 'publish' ? '正在发布 PR' : '正在刷新 CI', endpoint === 'publish' ? 'PR 已发布' : 'CI 已刷新', () => request(`/api/runs/${run.id}/${endpoint}`, { method: 'POST', body: '{}' }));
+    await refresh();
+  } catch (error) { tell(error.message, 'error'); }
+});
+
+$('#commandSearch').addEventListener('input', event => {
+  commandSelection = 0;
+  commandResults = searchEntities(commandIndex, event.currentTarget.value);
+  renderCommandResults();
+});
+$('#commandSearch').addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    if (!commandResults.length) return;
+    commandSelection = (commandSelection + (event.key === 'ArrowDown' ? 1 : -1) + commandResults.length) % commandResults.length;
+    renderCommandResults();
+    event.preventDefault();
+  } else if (event.key === 'Enter') {
+    selectCommandResult(commandResults[commandSelection]);
+    event.preventDefault();
+  } else if (event.key === 'Escape') {
+    $('#commandSearchResults').hidden = true;
+  }
+});
+$('#commandSearchResults').addEventListener('click', event => {
+  const option = event.target.closest('[data-command-result]');
+  if (option) selectCommandResult(commandResults[Number(option.dataset.commandResult)]);
+});
+document.addEventListener('keydown', event => {
+  if ((event.ctrlKey && event.key.toLowerCase() === 'k') || (event.key === '/' && !event.target.closest('input,textarea,select'))) {
+    event.preventDefault();
+    $('#commandSearch').focus();
+    $('#commandSearch').select();
+  }
+});
 $('#githubStatus').addEventListener('click', async () => { try { const result = await request('/api/github/connect', { method: 'POST', body: '{}' }); tell(result.message || 'GitHub 已连接。'); await refresh(); } catch (error) { tell(error.message, 'error'); } });
 $('#modeSwitch').addEventListener('click', event => { const button = event.target.closest('[data-mode]'); if (button) $('#modeSwitch').dataset.pendingMode = button.dataset.mode; $('#modeSwitch').querySelectorAll('button').forEach(item => item.classList.toggle('active', item === button)); });
 $('#saveSettings').addEventListener('click', async () => {
@@ -730,15 +881,14 @@ $('#approvalBoard').addEventListener('click', async event => {
   const item = state.approvals.find(candidate => candidate.id === id);
   if (!item) return tell('该审批已不再等待处理。', 'error');
   if (openButton) return openApprovalItem(item);
-  actionButton.disabled = true;
+  const action = actionButton.dataset.approvalAction;
+  const key = `approval:${id}:${action}`;
   try {
-    await request('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id, action: actionButton.dataset.approvalAction }) });
+    await withActionFeedback(key, '正在执行', '审批动作已完成', () => request('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id, action }) }));
     tell('审批动作已执行。');
     await refresh();
   } catch (error) {
     tell(error.message, 'error');
-  } finally {
-    actionButton.disabled = false;
   }
 });
 
@@ -940,7 +1090,7 @@ board.addEventListener('click', async event => {
   try {
     const endpoint = { prepare: 'prepare', start: 'start', verify: 'verify', merge: 'merge', review: 'review' }[action.dataset.action];
     contextDock.open(['verify', 'review'].includes(action.dataset.action) ? 'acceptance' : 'task', action.dataset.id);
-    await request(`/api/tasks/${action.dataset.id}/${endpoint}`, { method: 'POST', body: '{}' });
+    await withActionFeedback(`${action.dataset.id}:${action.dataset.action}`, `正在${action.textContent.trim()}`, '操作已完成', () => request(`/api/tasks/${action.dataset.id}/${endpoint}`, { method: 'POST', body: '{}' }));
     selectedTaskId = action.dataset.id; tell(`${action.dataset.id} 已执行 ${action.textContent.trim()}。`); await refresh();
   } catch (error) { tell(error.message, 'error'); }
 });
@@ -953,7 +1103,7 @@ $('#runsBoard').addEventListener('click', async event => {
   const action = event.target.closest('[data-run-action]'); if (!action) return;
   try {
     const endpoint = action.dataset.runAction === 'publish' ? 'publish' : 'refresh';
-    await request(`/api/runs/${action.dataset.runId}/${endpoint}`, { method: 'POST', body: '{}' });
+    await withActionFeedback(`run:${action.dataset.runId}:${endpoint}`, endpoint === 'publish' ? '正在发布 PR' : '正在刷新 CI', endpoint === 'publish' ? 'PR 已发布' : 'CI 已刷新', () => request(`/api/runs/${action.dataset.runId}/${endpoint}`, { method: 'POST', body: '{}' }));
     tell(endpoint === 'publish' ? '运行分支已推送并创建 PR。' : 'CI 状态已刷新。'); await refresh();
   } catch (error) { tell(error.message, 'error'); }
 });

@@ -1,4 +1,4 @@
-export function createRunCenter({ root, request, tell, onRefresh, getSelectedTask, onContext = () => {} }) {
+export function createRunCenter({ root, request, tell, onRefresh, getSelectedTask, onContext = () => {}, executeAction = (_action, operation) => operation() }) {
   const output = root.querySelector('#taskOutput');
   const search = root.querySelector('#logSearch');
   const follow = root.querySelector('#logFollow');
@@ -24,7 +24,7 @@ export function createRunCenter({ root, request, tell, onRefresh, getSelectedTas
     onContext(['verify', 'review'].includes(action.dataset.action) ? 'acceptance' : 'task', action.dataset.id);
     action.disabled = true;
     try {
-      await request(`/api/tasks/${action.dataset.id}/${endpoint}`, { method: 'POST', body: '{}' });
+      await executeAction(action, () => request(`/api/tasks/${action.dataset.id}/${endpoint}`, { method: 'POST', body: '{}' }));
       tell(`${action.dataset.id} 已执行 ${action.textContent.trim()}。`);
       await onRefresh();
     } catch (error) {
