@@ -2207,7 +2207,8 @@ const mime = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; chars
 const publicFiles = new Set([
   'index.html', 'styles.css', 'app.js',
   'styles/tokens.css', 'styles/shell.css', 'styles/components.css', 'styles/views.css',
-  'ui/api.js', 'ui/state.js', 'ui/layout-state.js', 'ui/layout.js',
+  'ui/api.js', 'ui/state.js', 'ui/layout-state.js', 'ui/layout.js', 'ui/context-dock.js',
+  'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js',
   'ui/run-center.js', 'ui/group-console.js', 'ui/dialogs.js'
 ]);
 async function staticFile(response, pathname) {

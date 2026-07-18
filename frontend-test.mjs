@@ -64,6 +64,9 @@ assert.equal(groupConsoleModule.includes('createGroupConsole'), true);
 assert.equal(dialogsModule.includes('createDialogs'), true);
 const streamEndpointSource = server.slice(server.indexOf("url.pathname === '/api/stream'"), server.indexOf("url.pathname === '/api/state'"));
 const broadcastSource = server.slice(server.indexOf('function broadcast'), server.indexOf('function appendEvent'));
+for (const modulePath of ['ui/context-dock.js', 'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js']) {
+  assert.equal(server.includes(`'${modulePath}'`), true, `Static server must expose ${modulePath}.`);
+}
 assert.match(streamEndpointSource, /last-event-id/i);
 assert.match(streamEndpointSource, /streamReplay/);
 assert.match(broadcastSource, /id:/);
@@ -93,6 +96,7 @@ assert.equal(script.includes('renderProcessMonitor'), true, 'Process monitor nee
 assert.equal(script.includes('recoveryStateCopy'), true, 'Process recovery states need explicit user-facing labels.');
 assert.equal(viewsCss.includes('.metrics-adapter-row'), true, 'Metrics need stable per-adapter rows.');
 assert.equal(viewsCss.includes('.process-row'), true, 'Process monitor needs stable process rows.');
+assert.equal(viewsCss.includes('-webkit-line-clamp:4'), true, 'Event summaries must not expand into full stack traces.');
 assert.equal(script.includes('data-approval-action'), true, 'Approval inbox needs explicit action controls.');
 assert.equal(script.includes('data-approval-open'), true, 'Complex approvals need detailed-view navigation.');
 assert.equal(script.includes("contextDock.open('discussion'"), true, 'Group sessions must open the discussion context.');
