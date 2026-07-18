@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, apiModule, layoutModule, runCenterModule, groupConsoleModule, dialogsModule, server, readme, configExampleText] = await Promise.all([
+const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, apiModule, layoutModule, contextDockModule, runCenterModule, groupConsoleModule, dialogsModule, server, readme, configExampleText] = await Promise.all([
   readFile(new URL('./index.html', import.meta.url), 'utf8'),
   readFile(new URL('./styles.css', import.meta.url), 'utf8'),
   readFile(new URL('./styles/tokens.css', import.meta.url), 'utf8'),
@@ -11,6 +11,7 @@ const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, 
   readFile(new URL('./app.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/api.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/layout.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/context-dock.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/run-center.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/group-console.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/dialogs.js', import.meta.url), 'utf8'),
@@ -40,7 +41,8 @@ assert.match(shellCss, /--inspector-width/);
 assert.match(shellCss, /grid-template-columns:[^;]*var\(--inspector-width\)/);
 assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.summary-grid\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.topbar-context\{display:none\}/);
-assert.equal(layoutModule.includes('aria-valuenow'), true);
+assert.equal(layoutModule.includes('createContextDock'), true, 'Layout must delegate inspector behavior to the shared context dock.');
+assert.equal(contextDockModule.includes('aria-valuenow'), true, 'The context dock resize separator must expose its current width.');
 assert.equal(apiModule.includes('Last-Event-ID'), true);
 assert.equal(runCenterModule.includes('createRunCenter'), true);
 assert.equal(groupConsoleModule.includes('createGroupConsole'), true);

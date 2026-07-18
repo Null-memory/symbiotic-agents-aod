@@ -1,4 +1,5 @@
-import { INSPECTOR_DEFAULT, INSPECTOR_MAX, INSPECTOR_MIN, clampInspectorWidth, isViewActive, normalizeViewMode, parseRoute, serializeRoute } from './layout-state.js';
+import { createContextDock } from './context-dock.js';
+import { isViewActive, normalizeViewMode, parseRoute, serializeRoute } from './layout-state.js';
 
 const safeStorage = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -7,33 +8,19 @@ const safeStorage = {
 
 export function createLayout({ onRouteChange = () => {} } = {}) {
   const shell = document.querySelector('#appShell');
-  const handle = document.querySelector('#inspectorResizeHandle');
-  const widthLabel = document.querySelector('#inspectorWidthLabel');
-  const collapseButton = document.querySelector('#collapseInspector');
-  const expandButton = document.querySelector('#expandInspector');
   const navButton = document.querySelector('#toggleNav');
   const workspace = document.querySelector('#workspaceMain');
   const viewModeSwitch = document.querySelector('#viewModeSwitch');
   const viewScrollPositions = new Map();
-  let width = clampInspectorWidth(safeStorage.get('aod.inspectorWidth'));
   let viewMode = normalizeViewMode(safeStorage.get('aod.workspaceViewMode'));
-  let dragging = false;
-
-  const applyWidth = value => {
-    width = clampInspectorWidth(value);
-    shell.style.setProperty('--inspector-width', `${width}px`);
-    handle.setAttribute('aria-valuenow', String(Math.round(width)));
-    widthLabel.textContent = `${Math.round(width)}px`;
-    safeStorage.set('aod.inspectorWidth', Math.round(width));
-  };
-
-  const setInspectorCollapsed = collapsed => {
-    shell.classList.toggle('is-inspector-collapsed', collapsed);
-    collapseButton.setAttribute('aria-expanded', String(!collapsed));
-    expandButton.setAttribute('aria-expanded', String(!collapsed));
-    safeStorage.set('aod.inspectorCollapsed', collapsed ? '1' : '0');
-    if (!collapsed) applyWidth(width);
-  };
+  const contextDock = createContextDock({
+    shell,
+    root: document.querySelector('#contextInspector'),
+    handle: document.querySelector('#inspectorResizeHandle'),
+    collapseButton: document.querySelector('#collapseInspector'),
+    expandButton: document.querySelector('#expandInspector'),
+    widthLabel: document.querySelector('#inspectorWidthLabel')
+  });
 
   const setNavCollapsed = collapsed => {
     shell.classList.toggle('is-nav-collapsed', collapsed);
@@ -87,41 +74,8 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
     renderRoute(parseRoute(location.hash), { rememberScroll: false, reveal: viewMode === 'all' });
   };
 
-  applyWidth(width || INSPECTOR_DEFAULT);
-  setInspectorCollapsed(safeStorage.get('aod.inspectorCollapsed') === '1');
   setNavCollapsed(safeStorage.get('aod.navCollapsed') === '1');
   renderViewMode();
-
-  handle.addEventListener('pointerdown', event => {
-    if (shell.classList.contains('is-inspector-collapsed')) return;
-    dragging = true;
-    handle.classList.add('dragging');
-    handle.setPointerCapture(event.pointerId);
-  });
-  handle.addEventListener('pointermove', event => {
-    if (!dragging) return;
-    applyWidth(shell.getBoundingClientRect().right - event.clientX);
-  });
-  const stopDragging = event => {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove('dragging');
-    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-  };
-  handle.addEventListener('pointerup', stopDragging);
-  handle.addEventListener('pointercancel', stopDragging);
-  handle.addEventListener('keydown', event => {
-    const step = event.shiftKey ? 24 : 8;
-    if (event.key === 'ArrowLeft') applyWidth(width + step);
-    else if (event.key === 'ArrowRight') applyWidth(width - step);
-    else if (event.key === 'Home') applyWidth(INSPECTOR_MIN);
-    else if (event.key === 'End') applyWidth(INSPECTOR_MAX);
-    else return;
-    event.preventDefault();
-  });
-  handle.addEventListener('dblclick', () => applyWidth(INSPECTOR_DEFAULT));
-  collapseButton.addEventListener('click', () => setInspectorCollapsed(true));
-  expandButton.addEventListener('click', () => setInspectorCollapsed(false));
   navButton.addEventListener('click', () => setNavCollapsed(!shell.classList.contains('is-nav-collapsed')));
   viewModeSwitch.addEventListener('click', event => {
     const button = event.target.closest('[data-view-mode]');
@@ -134,7 +88,7 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
     setRoute({ view: item.dataset.view });
   });
 
-  document.querySelector('.inspector-tabs').addEventListener('click', event => {
+  document.querySelector('.inspector-tabs')?.addEventListener('click', event => {
     const tab = event.target.closest('[data-inspector-tab]');
     if (!tab) return;
     const name = tab.dataset.inspectorTab;
@@ -145,5 +99,15 @@ export function createLayout({ onRouteChange = () => {} } = {}) {
   window.addEventListener('hashchange', () => renderRoute(parseRoute(location.hash), { reveal: viewMode === 'all' }));
   renderRoute(parseRoute(location.hash), { reveal: viewMode === 'all' });
 
-  return { applyWidth, setInspectorCollapsed, setNavCollapsed, setRoute, setViewMode, getRoute: () => parseRoute(location.hash), getViewMode: () => viewMode, getInspectorWidth: () => width };
+  return {
+    contextDock,
+    applyWidth: contextDock.applyWidth,
+    setInspectorCollapsed: collapsed => collapsed ? contextDock.collapse() : contextDock.expand(),
+    setNavCollapsed,
+    setRoute,
+    setViewMode,
+    getRoute: () => parseRoute(location.hash),
+    getViewMode: () => viewMode,
+    getInspectorWidth: () => contextDock.getState().width
+  };
 }
