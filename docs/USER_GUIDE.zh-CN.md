@@ -1,6 +1,6 @@
 # Symbiotic Agents AOD 使用指南
 
-本指南面向在同一台电脑、同一个本地 Git 仓库中使用 Codex、Claude Code 和 Antigravity 协同开发的操作者。
+本指南面向在同一台电脑、多个本地 Git 仓库中使用 Codex、Claude Code 和 Antigravity 协同开发的操作者。
 
 ## 1. AOD 能做什么
 
@@ -84,12 +84,14 @@ Copy-Item aod.config.example.json .aod.config.json
     "codex": {
       "command": "codex",
       "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"],
+      "discussionArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
       "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
       "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"],
+      "discussionArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"],
       "reviewArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"]
     }
   }
@@ -107,6 +109,7 @@ Copy-Item aod.config.example.json .aod.config.json
 | `plannerTimeoutMs` | DAG 规划超时 |
 | `allowedAcceptancePrefixes` | 允许执行的验收命令前缀 |
 | `args` | Agent 可写执行参数 |
+| `discussionArgs` | 群组讨论的只读参数；缺省时只回退到 `reviewArgs` |
 | `reviewArgs` | 检查阶段的只读参数 |
 | `stdin` | 通过标准输入传递给 CLI 的内容 |
 | `health.versionArgs` | 版本或基础可用性探针，默认 `--version` |
@@ -151,6 +154,21 @@ npm start
 ```
 
 停止服务时，在启动终端中按 `Ctrl+C`。SQLite、日志和运行状态保存在项目的 `.aod/` 目录中。
+
+### 4.1 选择本机项目
+
+顶栏左侧的项目按钮用于设置“新工作默认项目”：
+
+1. 点击项目按钮打开“选择本机项目”。
+2. 从已注册列表选择，或在右侧浏览主机目录。
+3. 也可以直接输入绝对路径并点击“验证”。
+4. 确认 Git 根、分支、commit 和 clean/dirty 状态后，点击“注册并选择”。
+
+只有已有至少一次提交的普通 Git 工作仓库可以注册。选择仓库子目录会自动解析到 Git 根。同一路径的大小写、斜杠形式或不同子目录不会产生重复项目。
+
+切换项目只影响之后创建的计划、运行、独立任务和群组会话。旧实体卡片上的项目徽标表示其不可变绑定；即使顶栏已切换，旧实体仍在原项目执行、验收、审查、合并和发布。路径暂时不可访问时，AOD 保留绑定并禁用需要文件系统的操作，不会改用当前项目。
+
+脏仓库允许注册，也允许发起只读群组讨论。创建运行、准备 worktree 和合并仍要求对应 Git 主工作区满足 clean gate。
 
 ## 5. 认识桌面工作台
 

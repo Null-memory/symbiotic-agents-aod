@@ -1,6 +1,6 @@
 # Symbiotic Agents AOD
 
-一个面向同一 Git 项目的本地多 Agent 协作器。它将运行、任务、事件、结构化日志、验收记录、进程状态和冲突审查持久化到 SQLite，为每个工作单元创建独立 Git worktree，并只允许通过当前提交验证的变更合并回主线。
+一个可管理多个本地 Git 项目的多 Agent 协作器。它将运行、任务、事件、结构化日志、验收记录、进程状态和冲突审查持久化到全局 SQLite 控制平面，为每个工作单元创建独立 Git worktree，并只允许通过当前提交验证的变更合并回对应项目主线。
 
 完整操作步骤参见：[中文使用指南](docs/USER_GUIDE.zh-CN.md)。
 
@@ -11,6 +11,12 @@ npm start
 ```
 
 打开 `http://127.0.0.1:4821`。项目目录必须是一个至少有一条提交记录的 Git 仓库，才能创建 worktree。
+
+## 项目工作区
+
+顶栏项目选择器可以注册主机内已有的 Git 仓库。支持直接输入绝对路径或从服务器目录浏览器选择目录；选择仓库子目录时会自动解析到真实 Git 根。仓库必须至少包含一次提交，非 Git 目录、bare 仓库和空仓库不会被注册。
+
+当前选择只决定新建计划、运行、独立任务和群组会话的默认项目。已有实体永久绑定到创建时的项目，切换顶栏项目不会让旧任务、Reviewer、合并或 GitHub 发布改到其他仓库。脏仓库可以注册并用于只读群组讨论，但创建运行、worktree 或合并时仍受现有 clean gate 限制。
 
 ## 运行模式
 
@@ -84,7 +90,7 @@ npm start
 
 调度器使用配置的命令和参数启动进程，将工作目录设为该任务 worktree，并把标准输出、标准错误保存到任务记录。不同版本的 Codex、Claude Code 与反重力 2.0 命令行参数可能不同，因此示例配置仅是结构模板。
 
-群组讨论在项目目录之外的隔离目录中调用相同适配器。检查者必须配置独立的只读 `reviewArgs`；AOD 不会把普通执行用的可写 `args` 回退给检查阶段，并会在检查结束后验证 detached worktree 的提交和文件状态未变化。`defaults.groupTurnTimeoutMs` 控制单个讨论回合超时；检查和修复默认沿用 `defaults.reviewTimeoutMs`。群组讨论、任务执行、角色检查和冲突 Reviewer 共用控制台设置的全局并发槽位。
+群组讨论在会话绑定项目的 Git 根目录运行，因此 Agent 可以读取真实代码上下文。讨论优先使用只读 `discussionArgs`，缺省时只回退到 `reviewArgs`，绝不会使用普通任务的可写 `args`。AOD 在每个回合前后比较 HEAD 和完整 porcelain 状态；检测到变化时冻结会话为 `recovery_required`，保留现场且不会自动 reset、checkout 或删除文件。检查者仍必须配置只读 `reviewArgs`，并在检查结束后验证 detached worktree 的提交和文件状态未变化。`defaults.groupTurnTimeoutMs` 控制单个讨论回合超时；检查和修复默认沿用 `defaults.reviewTimeoutMs`。群组讨论、任务执行、角色检查和冲突 Reviewer 共用全局并发槽位。
 
 验收命令默认仅允许 `npm`、`node`、`pnpm`、`yarn`、`git`、`python` 和 `py` 前缀。可在 `security.allowedAcceptancePrefixes` 调整。常见令牌会从结构化日志和验收输出中脱敏。
 
