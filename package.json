@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check approval-domain.mjs && node --check process-domain.mjs && node --check group-domain.mjs && node --check group-schema.mjs && node --check app.js && node --check ui/api.js && node --check ui/state.js && node --check ui/layout-state.js && node --check ui/render-scheduler.js && node --check ui/run-stage.js && node --check ui/context-dock.js && node --check ui/command-search.js && node --check ui/action-feedback.js && node --check ui/layout.js && node --check ui/run-center.js && node --check ui/group-console.js && node --check ui/dialogs.js",
-    "test": "node --test approval-domain.test.mjs process-domain.test.mjs group-domain.test.mjs group-schema.test.mjs layout-state.test.mjs render-scheduler.test.mjs run-stage.test.mjs context-dock.test.mjs command-search.test.mjs action-feedback.test.mjs && node frontend-test.mjs && node test.mjs"
+    "check": "node --check server.mjs && node --check approval-domain.mjs && node --check process-domain.mjs && node --check group-domain.mjs && node --check group-schema.mjs && node --check workspace-domain.mjs && node --check app.js && node --check ui/api.js && node --check ui/state.js && node --check ui/layout-state.js && node --check ui/render-scheduler.js && node --check ui/run-stage.js && node --check ui/context-dock.js && node --check ui/command-search.js && node --check ui/action-feedback.js && node --check ui/layout.js && node --check ui/run-center.js && node --check ui/group-console.js && node --check ui/dialogs.js",
+    "test": "node --test approval-domain.test.mjs process-domain.test.mjs group-domain.test.mjs group-schema.test.mjs workspace-domain.test.mjs layout-state.test.mjs render-scheduler.test.mjs run-stage.test.mjs context-dock.test.mjs command-search.test.mjs action-feedback.test.mjs && node frontend-test.mjs && node test.mjs"
   }
 }
