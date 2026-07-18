@@ -95,6 +95,10 @@ assert.equal(viewsCss.includes('.metrics-adapter-row'), true, 'Metrics need stab
 assert.equal(viewsCss.includes('.process-row'), true, 'Process monitor needs stable process rows.');
 assert.equal(script.includes('data-approval-action'), true, 'Approval inbox needs explicit action controls.');
 assert.equal(script.includes('data-approval-open'), true, 'Complex approvals need detailed-view navigation.');
+assert.equal(script.includes("contextDock.open('discussion'"), true, 'Group sessions must open the discussion context.');
+assert.equal(script.includes("contextDock.open('task'"), true, 'Task selection must open task context.');
+assert.equal(script.includes("contextDock.open('acceptance'"), true, 'Verification and review actions must open acceptance context.');
+assert.equal(script.includes('groupConsole.scrollIntoView'), false, 'Opening discussion must not move the main workspace scroll position.');
 
 assert.match(css, /@media\s*\(max-width:560px\)[\s\S]*?\.group-mobile-tabs\s*\{[^}]*display:flex/);
 assert.equal(css.includes('[data-active-pane="chat"] [data-mobile-pane]:not([data-mobile-pane="chat"])'), true);

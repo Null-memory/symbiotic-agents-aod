@@ -17,7 +17,7 @@ const groupConsole = $('#groupConsole');
 
 function mountPrimaryViews() {
   const placements = {
-    groups: ['.agent-health-section', '.groups-section', '#groupConsole'],
+    groups: ['.agent-health-section', '.groups-section'],
     tasks: ['.tasks-section'],
     delivery: ['.runs-section']
   };
@@ -63,10 +63,19 @@ const layout = createLayout({
     if (state) { renderBoard(); renderDetail(); }
   }
 });
+const contextDock = layout.contextDock;
 const groupConsoleUi = createGroupConsole({ root: groupConsole });
 const dialogsUi = createDialogs();
-const runCenterUi = createRunCenter({ root: $('#contextInspector'), request, tell, onRefresh: refresh, getSelectedTask: selectedTask });
+const runCenterUi = createRunCenter({
+  root: $('#contextInspector'), request, tell, onRefresh: refresh, getSelectedTask: selectedTask,
+  onContext: (tab, taskId) => contextDock.open(tab, taskId)
+});
 void dialogsUi;
+
+$('#contextInspector [data-context-tabs]').addEventListener('click', () => requestAnimationFrame(() => {
+  if (contextDock.getState().tab === 'discussion') renderGroupConsole();
+  else renderDetail();
+}));
 
 function tell(message, kind = '') {
   notice.textContent = message;
@@ -130,11 +139,14 @@ function renderBoard() {
 
 function renderDetail() {
   const task = selectedTask();
-  if (!task) { $('#taskDetailTitle').textContent = '选择任务'; $('#taskDetailStatus').textContent = 'IDLE'; $('#taskDetailMeta').textContent = '从队列选择一个任务以查看运行记录。'; $('#taskOutput').textContent = 'No task selected.'; $('#verificationResult').innerHTML = '<p class="empty">尚无验收结果。</p>'; $('#inspectorOverview').innerHTML = '<div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div>'; return; }
+  const taskHeaderActive = contextDock.getState().tab !== 'discussion';
+  if (!task) { if (taskHeaderActive) { $('#taskDetailTitle').textContent = '选择任务'; $('#taskDetailStatus').textContent = 'IDLE'; $('#taskDetailMeta').textContent = '从队列选择一个任务以查看运行记录。'; } $('#taskOutput').textContent = 'No task selected.'; $('#verificationResult').innerHTML = '<p class="empty">尚无验收结果。</p>'; $('#inspectorOverview').innerHTML = '<div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div>'; return; }
   selectedTaskId = task.id;
-  $('#taskDetailTitle').textContent = `${task.id} ${task.title}`;
-  $('#taskDetailStatus').textContent = statusLabel(task.status);
-  $('#taskDetailMeta').textContent = `${task.agent} | ${task.worktree || '尚未准备 worktree'} | ${task.branch}`;
+  if (taskHeaderActive) {
+    $('#taskDetailTitle').textContent = `${task.id} ${task.title}`;
+    $('#taskDetailStatus').textContent = statusLabel(task.status);
+    $('#taskDetailMeta').textContent = `${task.agent} | ${task.worktree || '尚未准备 worktree'} | ${task.branch}`;
+  }
   runCenterUi.setOutput(task.output || '等待 Agent 输出。');
   $('#verificationResult').innerHTML = task.verification ? `<span>验收：${escapeHtml(task.verification.command)}</span><b>${escapeHtml(task.verification.commit || '')}</b><pre>${escapeHtml(task.verification.output)}</pre>` : '';
   $('#inspectorOverview').innerHTML = `<dl class="task-overview-grid"><div><dt>Agent</dt><dd>${escapeHtml(task.agent)}</dd></div><div><dt>状态</dt><dd>${statusLabel(task.status)}</dd></div><div><dt>Commit</dt><dd>${shortCommit(task.verified_commit)}</dd></div><div><dt>分支</dt><dd>${escapeHtml(task.branch || '—')}</dd></div><div class="wide"><dt>Worktree</dt><dd title="${escapeHtml(task.worktree || '')}">${escapeHtml(task.worktree || '尚未准备')}</dd></div><div class="wide"><dt>文件范围</dt><dd>${task.files.map(escapeHtml).join(', ')}</dd></div></dl><div class="inspector-actions">${taskActions(task) || '<span class="empty-inline">当前没有可执行操作</span>'}</div>`;
@@ -417,10 +429,23 @@ function renderGroupConsensus() {
 
 function renderGroupConsole() {
   groupConsole.hidden = !groupConsoleOpen;
-  if (!groupConsoleOpen) return;
+  $('#discussionEmpty').hidden = groupConsoleOpen;
+  if (!groupConsoleOpen) {
+    if (contextDock.getState().tab === 'discussion') {
+      $('#taskDetailTitle').textContent = '选择群组会话';
+      $('#taskDetailStatus').textContent = 'IDLE';
+      $('#taskDetailMeta').textContent = '从群组列表打开一个讨论会话。';
+    }
+    return;
+  }
   const group = groupById(selectedGroupId || selectedGroupSession?.group_id);
   $('#groupConsoleTitle').textContent = group ? `${group.name} / 运行中心` : '群组运行中心';
   $('#groupConsoleStatus').textContent = selectedGroupSession ? `${selectedGroupSession.id} / ${statusLabel(selectedGroupSession.status)}` : 'LOADING';
+  if (contextDock.getState().tab === 'discussion') {
+    $('#taskDetailTitle').textContent = group?.name || '群组讨论';
+    $('#taskDetailStatus').textContent = selectedGroupSession ? statusLabel(selectedGroupSession.status) : 'LOADING';
+    $('#taskDetailMeta').textContent = selectedGroupSession ? `${selectedGroupSession.id} | 第 ${selectedGroupSession.current_round}/${selectedGroupSession.max_rounds} 轮` : '正在读取会话。';
+  }
   $('#groupRound').textContent = selectedGroupSession ? `ROUND ${selectedGroupSession.current_round} / ${selectedGroupSession.max_rounds}` : 'ROUND 0 / 0';
   renderGroupMembers();
   renderGroupMessages();
@@ -456,6 +481,7 @@ function render(nextState, health) {
   $('#agentCount').textContent = `${state.runtime.activeAgents} / ${state.maxConcurrency}`;
   $('#mergeCount').textContent = state.stats.mergeReady;
   $('#conflictCount').textContent = state.approvals?.length || 0;
+  $('#pendingActionCount strong').textContent = state.approvals?.length || 0;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
   renderMetrics(); renderProcessMonitor(); renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
 }
@@ -463,6 +489,8 @@ function render(nextState, health) {
 async function openApprovalItem(item) {
   if (item.entityType === 'task') {
     selectedTaskId = item.entityId;
+    const tab = ['task_verify', 'task_recovery', 'conflict_review'].includes(item.kind) ? 'acceptance' : 'task';
+    contextDock.open(tab, item.entityId);
     layout.setRoute({ view: 'tasks', runId: item.runId, taskId: item.entityId });
     renderBoard(); renderDetail();
     return;
@@ -470,9 +498,9 @@ async function openApprovalItem(item) {
   if (item.entityType === 'review') {
     const review = state.reviews.find(candidate => candidate.id === item.entityId);
     selectedTaskId = review?.task_id || null;
+    contextDock.open('acceptance', selectedTaskId);
     layout.setRoute({ view: 'tasks', runId: item.runId, taskId: selectedTaskId });
     renderBoard(); renderDetail(); renderReview();
-    document.querySelector('[data-inspector-tab="review"]')?.click();
     return;
   }
   if (item.entityType === 'group_session') {
@@ -510,11 +538,10 @@ async function openGroupSession(sessionId, groupId = null) {
   groupMessages = [];
   groupMessagesAfter = 0;
   groupConsoleOpen = true;
-  layout.setRoute({ view: 'groups' });
+  contextDock.open('discussion', sessionId);
   groupConsoleUi.setActivePane('chat');
   renderGroupConsole();
   await refreshSelectedGroupSession(true);
-  groupConsole.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 async function refresh() {
@@ -721,6 +748,7 @@ $('#processMonitor').addEventListener('click', async event => {
     const task = state.tasks.find(item => item.id === taskButton.dataset.processTask);
     if (!task) return tell('关联任务已不在当前工作区。', 'error');
     selectedTaskId = task.id;
+    contextDock.open('task', task.id);
     layout.setRoute({ view: 'tasks', runId: task.run_id, taskId: task.id });
     renderBoard();
     renderDetail();
@@ -815,7 +843,7 @@ groupsBoard.addEventListener('click', async event => {
   } catch (error) { tell(error.message, 'error'); }
 });
 
-$('#closeGroupConsole').addEventListener('click', () => { groupConsoleOpen = false; renderGroupConsole(); });
+$('#closeGroupConsole').addEventListener('click', () => { groupConsoleOpen = false; contextDock.selectTab('task'); renderGroupConsole(); renderDetail(); });
 groupConsole.addEventListener('click', async event => {
   const tab = event.target.closest('[data-group-tab]');
   if (tab) return;
@@ -902,15 +930,16 @@ $('#taskForm').addEventListener('submit', async event => {
   const form = new FormData(formElement);
   try {
     const task = await request('/api/tasks', { method: 'POST', body: JSON.stringify({ title: form.get('title'), agent: form.get('agent'), files: String(form.get('files')).split(',').map(value => value.trim()).filter(Boolean), dependsOn: form.get('dependsOn') ? [form.get('dependsOn')] : [], acceptance: form.get('acceptance'), timeoutMs: Number(form.get('timeoutMinutes')) * 60000, maxRetries: Number(form.get('maxRetries')) }) });
-    selectedTaskId = task.id; dialog.close(); formElement.reset(); layout.setRoute({ view: 'tasks', taskId: task.id }); tell('任务已创建。当前模式会决定后续自动步骤。'); await refresh();
+    selectedTaskId = task.id; dialog.close(); formElement.reset(); contextDock.open('task', task.id); layout.setRoute({ view: 'tasks', taskId: task.id }); tell('任务已创建。当前模式会决定后续自动步骤。'); await refresh();
   } catch (error) { tell(error.message, 'error'); }
 });
 
 board.addEventListener('click', async event => {
-  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); layout.setRoute({ view: 'tasks', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); return; }
+  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); contextDock.open('task', selectedTaskId); layout.setRoute({ view: 'tasks', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); return; }
   const action = event.target.closest('[data-action]'); if (!action) return;
   try {
     const endpoint = { prepare: 'prepare', start: 'start', verify: 'verify', merge: 'merge', review: 'review' }[action.dataset.action];
+    contextDock.open(['verify', 'review'].includes(action.dataset.action) ? 'acceptance' : 'task', action.dataset.id);
     await request(`/api/tasks/${action.dataset.id}/${endpoint}`, { method: 'POST', body: '{}' });
     selectedTaskId = action.dataset.id; tell(`${action.dataset.id} 已执行 ${action.textContent.trim()}。`); await refresh();
   } catch (error) { tell(error.message, 'error'); }
