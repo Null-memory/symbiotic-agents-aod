@@ -1,0 +1,661 @@
+﻿{
+  "initial1440": {
+    "label": "1440-initial",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "208px 865px 7px 360px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 208,
+      "height": 900
+    },
+    "main": {
+      "x": 208,
+      "y": 56,
+      "width": 865,
+      "height": 844
+    },
+    "dock": {
+      "x": 1080,
+      "y": 0,
+      "width": 360,
+      "height": 900
+    },
+    "viewport": {
+      "x": 1090,
+      "y": 141,
+      "width": 341,
+      "height": 745
+    },
+    "stage": {
+      "x": 226,
+      "y": 149,
+      "width": 526,
+      "height": 48
+    },
+    "next": {
+      "x": 760,
+      "y": 149,
+      "width": 280,
+      "height": 48
+    },
+    "navCollapsed": false,
+    "dockCollapsed": false,
+    "contextTab": "task",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 169
+      }
+    ]
+  },
+  "screenshot1440": "E:/多agent协同-agent-groups/docs/verification/assets/adaptive-workbench-1440-task.png",
+  "discussion": {
+    "label": "1440-discussion",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "208px 725.156px 7px 499.844px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 208,
+      "height": 900
+    },
+    "main": {
+      "x": 208,
+      "y": 56,
+      "width": 725,
+      "height": 844
+    },
+    "dock": {
+      "x": 940,
+      "y": 0,
+      "width": 500,
+      "height": 900
+    },
+    "viewport": {
+      "x": 950,
+      "y": 141,
+      "width": 481,
+      "height": 745
+    },
+    "stage": {
+      "x": 226,
+      "y": 144,
+      "width": 674,
+      "height": 31
+    },
+    "next": {
+      "x": 226,
+      "y": 183,
+      "width": 674,
+      "height": 50
+    },
+    "navCollapsed": false,
+    "dockCollapsed": false,
+    "contextTab": "discussion",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 230
+      }
+    ]
+  },
+  "discussionBackground": "rgb(24, 35, 38)",
+  "screenshotDiscussion": "E:/多agent协同-agent-groups/docs/verification/assets/adaptive-workbench-1440-discussion.png",
+  "minimum": {
+    "label": "1440-minimum",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "208px 944.625px 7px 280.375px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 208,
+      "height": 900
+    },
+    "main": {
+      "x": 208,
+      "y": 56,
+      "width": 945,
+      "height": 844
+    },
+    "dock": {
+      "x": 1160,
+      "y": 0,
+      "width": 280,
+      "height": 900
+    },
+    "viewport": {
+      "x": 1170,
+      "y": 141,
+      "width": 261,
+      "height": 745
+    },
+    "stage": {
+      "x": 226,
+      "y": 144,
+      "width": 578,
+      "height": 48
+    },
+    "next": {
+      "x": 812,
+      "y": 144,
+      "width": 308,
+      "height": 48
+    },
+    "navCollapsed": false,
+    "dockCollapsed": false,
+    "contextTab": "task",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 196
+      }
+    ]
+  },
+  "maximum": {
+    "label": "1440-maximum",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "208px 665px 7px 560px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 208,
+      "height": 900
+    },
+    "main": {
+      "x": 208,
+      "y": 56,
+      "width": 665,
+      "height": 844
+    },
+    "dock": {
+      "x": 880,
+      "y": 0,
+      "width": 560,
+      "height": 900
+    },
+    "viewport": {
+      "x": 890,
+      "y": 141,
+      "width": 541,
+      "height": 745
+    },
+    "stage": {
+      "x": 226,
+      "y": 144,
+      "width": 614,
+      "height": 31
+    },
+    "next": {
+      "x": 226,
+      "y": 183,
+      "width": 614,
+      "height": 50
+    },
+    "navCollapsed": false,
+    "dockCollapsed": false,
+    "contextTab": "task",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 200
+      }
+    ]
+  },
+  "collapsed": {
+    "label": "1440-collapsed",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "208px 1180px 0px 52px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 208,
+      "height": 900
+    },
+    "main": {
+      "x": 208,
+      "y": 56,
+      "width": 1180,
+      "height": 844
+    },
+    "dock": {
+      "x": 1388,
+      "y": 0,
+      "width": 52,
+      "height": 900
+    },
+    "viewport": {
+      "x": 1412,
+      "y": 412,
+      "width": 33,
+      "height": 474
+    },
+    "stage": {
+      "x": 226,
+      "y": 144,
+      "width": 731,
+      "height": 48
+    },
+    "next": {
+      "x": 965,
+      "y": 144,
+      "width": 390,
+      "height": 48
+    },
+    "navCollapsed": false,
+    "dockCollapsed": true,
+    "contextTab": "task",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 127
+      },
+      {
+        "text": "讨论",
+        "className": "",
+        "scrollWidth": 16,
+        "clientWidth": 12
+      },
+      {
+        "text": "任务详情",
+        "className": "active",
+        "scrollWidth": 16,
+        "clientWidth": 12
+      },
+      {
+        "text": "验收",
+        "className": "",
+        "scrollWidth": 16,
+        "clientWidth": 12
+      },
+      {
+        "text": "概览",
+        "className": "active",
+        "scrollWidth": 15,
+        "clientWidth": 10
+      },
+      {
+        "text": "实时输出",
+        "className": "",
+        "scrollWidth": 15,
+        "clientWidth": 10
+      }
+    ]
+  },
+  "screenshotCollapsed": "E:/多agent协同-agent-groups/docs/verification/assets/adaptive-workbench-1440-collapsed.png",
+  "navCollapsed": {
+    "label": "1440-nav-collapsed",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "72px 1001px 7px 360px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 72,
+      "height": 900
+    },
+    "main": {
+      "x": 72,
+      "y": 56,
+      "width": 1001,
+      "height": 844
+    },
+    "dock": {
+      "x": 1080,
+      "y": 0,
+      "width": 360,
+      "height": 900
+    },
+    "viewport": {
+      "x": 1090,
+      "y": 141,
+      "width": 341,
+      "height": 745
+    },
+    "stage": {
+      "x": 90,
+      "y": 144,
+      "width": 614,
+      "height": 48
+    },
+    "next": {
+      "x": 712,
+      "y": 144,
+      "width": 328,
+      "height": 48
+    },
+    "navCollapsed": true,
+    "dockCollapsed": false,
+    "contextTab": "task",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 138
+      }
+    ]
+  },
+  "overview": {
+    "label": "1440-overview",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "72px 1001px 7px 360px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 72,
+      "height": 900
+    },
+    "main": {
+      "x": 72,
+      "y": 56,
+      "width": 1001,
+      "height": 844
+    },
+    "dock": {
+      "x": 1080,
+      "y": 0,
+      "width": 360,
+      "height": 900
+    },
+    "viewport": {
+      "x": 1090,
+      "y": 141,
+      "width": 341,
+      "height": 745
+    },
+    "stage": {
+      "x": 90,
+      "y": 144,
+      "width": 614,
+      "height": 48
+    },
+    "next": {
+      "x": 712,
+      "y": 144,
+      "width": 328,
+      "height": 48
+    },
+    "navCollapsed": true,
+    "dockCollapsed": false,
+    "contextTab": "task",
+    "activeViews": [
+      "runs",
+      "groups",
+      "tasks",
+      "delivery"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 138
+      },
+      {
+        "text": "C:\\Windows\\System32\\WindowsPowerShell\\v1",
+        "className": "",
+        "scrollWidth": 400,
+        "clientWidth": 254
+      }
+    ]
+  },
+  "focusGroups": {
+    "label": "1440-focus-groups",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "72px 1001px 7px 360px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 72,
+      "height": 900
+    },
+    "main": {
+      "x": 72,
+      "y": 56,
+      "width": 1001,
+      "height": 844
+    },
+    "dock": {
+      "x": 1080,
+      "y": 0,
+      "width": 360,
+      "height": 900
+    },
+    "viewport": {
+      "x": 1090,
+      "y": 141,
+      "width": 341,
+      "height": 745
+    },
+    "stage": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "next": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "navCollapsed": true,
+    "dockCollapsed": false,
+    "contextTab": "task",
+    "activeViews": [
+      "groups"
+    ],
+    "clipped": [
+      {
+        "text": "C:\\Windows\\System32\\WindowsPowerShell\\v1",
+        "className": "",
+        "scrollWidth": 400,
+        "clientWidth": 254
+      }
+    ]
+  },
+  "activeDiscussion": {
+    "label": "1440-active-discussion",
+    "inner": [
+      1440,
+      900
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "72px 861px 7px 500px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 72,
+      "height": 900
+    },
+    "main": {
+      "x": 72,
+      "y": 56,
+      "width": 861,
+      "height": 844
+    },
+    "dock": {
+      "x": 940,
+      "y": 0,
+      "width": 500,
+      "height": 900
+    },
+    "viewport": {
+      "x": 950,
+      "y": 141,
+      "width": 481,
+      "height": 745
+    },
+    "stage": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "next": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "navCollapsed": true,
+    "dockCollapsed": false,
+    "contextTab": "discussion",
+    "activeViews": [
+      "groups"
+    ],
+    "clipped": [
+      {
+        "text": "C:\\Windows\\System32\\WindowsPowerShell\\v1",
+        "className": "",
+        "scrollWidth": 400,
+        "clientWidth": 250
+      }
+    ]
+  },
+  "screenshotActiveDiscussion": "E:/多agent协同-agent-groups/docs/verification/assets/adaptive-workbench-1440-active-discussion.png",
+  "initial1280": {
+    "label": "1280-initial",
+    "inner": [
+      1280,
+      800
+    ],
+    "documentOverflow": 0,
+    "bodyOverflow": 0,
+    "shellColumns": "208px 565px 7px 500px",
+    "nav": {
+      "x": 0,
+      "y": 0,
+      "width": 208,
+      "height": 800
+    },
+    "main": {
+      "x": 208,
+      "y": 56,
+      "width": 565,
+      "height": 744
+    },
+    "dock": {
+      "x": 780,
+      "y": 0,
+      "width": 500,
+      "height": 800
+    },
+    "viewport": {
+      "x": 790,
+      "y": 141,
+      "width": 481,
+      "height": 645
+    },
+    "stage": {
+      "x": 226,
+      "y": 149,
+      "width": 514,
+      "height": 31
+    },
+    "next": {
+      "x": 226,
+      "y": 188,
+      "width": 514,
+      "height": 50
+    },
+    "navCollapsed": false,
+    "dockCollapsed": false,
+    "contextTab": "discussion",
+    "activeViews": [
+      "runs"
+    ],
+    "clipped": [
+      {
+        "text": "codex: error / ����λ�� ��:1 �ַ�: 3\n+ --v",
+        "className": "",
+        "scrollWidth": 272,
+        "clientWidth": 150
+      }
+    ]
+  },
+  "screenshot1280": "E:/多agent协同-agent-groups/docs/verification/assets/adaptive-workbench-1280.png",
+  "searchFocused": "commandSearch",
+  "searchResultCount": 2,
+  "reducedMotion": {
+    "shellTransition": "0s",
+    "panelAnimation": "0s"
+  },
+  "motion": {
+    "feedback": "120ms",
+    "tab": "160ms",
+    "open": "200ms",
+    "close": "160ms",
+    "layout": "200ms"
+  },
+  "errors": []
+}
