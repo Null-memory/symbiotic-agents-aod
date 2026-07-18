@@ -57,10 +57,15 @@ for (const id of ['groupsBoard', 'openGroupDialog', 'groupDialog', 'groupConsole
 for (const id of ['addGroupMember', 'groupMemberTemplate']) {
   assert.equal(html.includes(`id="${id}"`), true, `Multi-seat group editor is missing #${id}.`);
 }
+for (const id of ['agentHealthBoard', 'checkAllAgents']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Agent diagnostics are missing #${id}.`);
+}
 assert.equal(html.includes('name="agent"'), true, 'Group seats need an adapter selector.');
 assert.equal(html.includes('data-remove-group-member'), true, 'Group seats need an explicit remove control.');
 assert.equal(script.includes('createGroupMemberRow'), true, 'Group editor must render dynamic member rows.');
 assert.equal(script.includes('nextGroupMemberKey'), true, 'New group seats need deterministic unique keys.');
+assert.equal(script.includes('data-agent-health'), true, 'Agent diagnostics need per-adapter check actions.');
+assert.equal(script.includes('renderAgentHealth'), true, 'Agent diagnostics need a state renderer.');
 
 assert.match(css, /@media\s*\(max-width:560px\)[\s\S]*?\.group-mobile-tabs\s*\{[^}]*display:flex/);
 assert.equal(css.includes('[data-active-pane="chat"] [data-mobile-pane]:not([data-mobile-pane="chat"])'), true);

@@ -84,7 +84,8 @@ Copy-Item aod.config.example.json .aod.config.json
     "codex": {
       "command": "codex",
       "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"]
+      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
+      "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
@@ -108,6 +109,9 @@ Copy-Item aod.config.example.json .aod.config.json
 | `args` | Agent 可写执行参数 |
 | `reviewArgs` | 检查阶段的只读参数 |
 | `stdin` | 通过标准输入传递给 CLI 的内容 |
+| `health.versionArgs` | 版本或基础可用性探针，默认 `--version` |
+| `health.authArgs` | 可选的非交互认证状态探针；不配置时不会猜测登录命令 |
+| `health.timeoutMs` | 单个体检探针超时，默认 10 秒 |
 
 可用占位符：
 
@@ -116,7 +120,7 @@ Copy-Item aod.config.example.json .aod.config.json
 - `{{promptFile}}`：完整提示词文件路径。
 - `{{prompt}}`：完整任务或讨论提示词。
 
-不同 CLI 版本的参数可能不同。首次使用前，建议在终端中手动执行对应命令，确认其可以非交互退出。
+不同 CLI 版本的参数可能不同。首次使用前，建议在终端中手动执行对应命令，确认其可以非交互退出。Agent 群组页的“Agent 连接体检”会持久化命令路径、版本、认证探针状态和耗时，但 CLI 凭据仍只由对应工具管理，不写入 AOD 数据库。
 
 ## 4. 启动 AOD
 

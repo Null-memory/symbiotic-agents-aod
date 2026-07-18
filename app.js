@@ -17,7 +17,7 @@ const groupConsole = $('#groupConsole');
 
 function mountPrimaryViews() {
   const placements = {
-    groups: ['.groups-section', '#groupConsole'],
+    groups: ['.agent-health-section', '.groups-section', '#groupConsole'],
     tasks: ['.tasks-section'],
     delivery: ['.runs-section']
   };
@@ -179,6 +179,25 @@ function renderGroups() {
   }).join('');
 }
 
+function renderAgentHealth() {
+  const board = $('#agentHealthBoard');
+  const rows = state.agentHealth || [];
+  if (!rows.length) {
+    board.innerHTML = '<p class="empty">尚无 Agent 适配器状态。</p>';
+    return;
+  }
+  const statusCopy = { ready: '可用', warning: '需认证配置', error: '检查失败', unconfigured: '未配置', not_checked: '未检查' };
+  const authCopy = { ready: '已通过', failed: '失败', unknown: '未配置', not_checked: '未检查' };
+  board.innerHTML = rows.map(item => `<article class="agent-health-row status-${escapeHtml(item.status)}">
+    <div class="agent-health-identity"><span class="agent-health-signal" aria-hidden="true"></span><div><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><span title="${escapeHtml(item.resolved_path || item.command || '')}">${escapeHtml(item.resolved_path || item.command || '未配置命令')}</span></div></div>
+    <div><span>VERSION</span><b>${escapeHtml(item.version || '—')}</b></div>
+    <div><span>AUTH</span><b>${escapeHtml(authCopy[item.auth_status] || item.auth_status)}</b></div>
+    <div><span>LATENCY</span><b>${item.checked_at ? `${Number(item.latency_ms || 0)} ms` : '—'}</b></div>
+    <div class="agent-health-result"><span class="status-pill">${escapeHtml(statusCopy[item.status] || item.status)}</span><small title="${escapeHtml(item.message || '')}">${escapeHtml(item.message || '')}</small></div>
+    <button class="secondary small" type="button" data-agent-health="${escapeHtml(item.agent)}">检查</button>
+  </article>`).join('');
+}
+
 function renderGroupMembers() {
   const members = selectedGroupSession?.members || [];
   const turns = selectedGroupSession?.turns || [];
@@ -331,7 +350,7 @@ function render(nextState, health) {
   $('#mergeCount').textContent = state.stats.mergeReady;
   $('#conflictCount').textContent = state.stats.conflicts;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
-  renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+  renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
 }
 
 async function refreshSelectedGroupSession(resetMessages = false) {
@@ -515,6 +534,35 @@ $('#modeSwitch').addEventListener('click', event => { const button = event.targe
 $('#saveSettings').addEventListener('click', async () => {
   try { await request('/api/settings', { method: 'POST', body: JSON.stringify({ mode: $('#modeSwitch').dataset.pendingMode || state.mode, maxConcurrency: Number($('#maxConcurrency').value) }) }); tell('运行策略已更新。'); await refresh(); }
   catch (error) { tell(error.message, 'error'); }
+});
+
+$('#agentHealthBoard').addEventListener('click', async event => {
+  const button = event.target.closest('[data-agent-health]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const result = await request(`/api/agents/${button.dataset.agentHealth}/check`, { method: 'POST', body: '{}' });
+    tell(`${agentLabels[result.agent] || result.agent}：${result.message}`);
+    await refresh();
+  } catch (error) {
+    tell(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#checkAllAgents').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    for (const agent of state.agents) await request(`/api/agents/${agent}/check`, { method: 'POST', body: '{}' });
+    tell('Agent 连接体检已完成。');
+    await refresh();
+  } catch (error) {
+    tell(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $('#groupMemberEditor').addEventListener('change', event => {

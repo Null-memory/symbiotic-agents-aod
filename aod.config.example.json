@@ -14,17 +14,20 @@
     "codex": {
       "command": "codex",
       "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"]
+      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
+      "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
       "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"],
-      "reviewArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"]
+      "reviewArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"],
+      "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "antigravity": {
       "command": "antigravity",
       "args": ["chat", "--mode", "agent", "-"],
-      "stdin": "{{prompt}}"
+      "stdin": "{{prompt}}",
+      "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     }
   }
 }

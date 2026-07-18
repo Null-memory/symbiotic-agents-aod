@@ -46,12 +46,14 @@ async function readSseInitialState() {
   controller.abort();
   return new TextDecoder().decode(value);
 }
-async function waitForTaskStatus(id, expected) {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const current = await api('/api/state');
+async function waitForTaskStatus(id, expected, { timeoutMs = 9000, pollMs = 75 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const current = await api('/api/state', { signal: AbortSignal.timeout(remainingMs) });
     const task = current.tasks.find(item => item.id === id);
     if (task?.status === expected) return task;
-    await new Promise(resolve => setTimeout(resolve, 75));
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
   }
   const current = await api('/api/state');
   const task = current.tasks.find(item => item.id === id);
@@ -137,13 +139,41 @@ try {
       args: ['-e', "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1000);console.log(JSON.stringify({title:'Planned run',tasks:[{key:'docs',title:'Create delivery note',agent:'codex',files:['delivery-note.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'none'}]}))"]
     },
     agents: {
-      codex: { command: process.execPath, args: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'] },
+      codex: { command: process.execPath, args: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'], health: { versionArgs: ['--version'], authArgs: ['-e', "console.log('authenticated')"] } },
       'claude-code': { command: process.execPath, args: ['-e', fakeClaude, '{{worktree}}'], reviewArgs: ['-e', fakeClaude, '{{worktree}}'], timeoutMs: 75 },
-      antigravity: { command: process.execPath, args: ['-e', fakeAntigravity] }
+      antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
     }
   }));
   daemon = spawn(process.execPath, ['server.mjs'], { cwd: fixture, env: { ...process.env, PORT: String(port) }, windowsHide: true });
   await waitForHealth();
+
+  const codexHealth = await api('/api/agents/codex/check', { method: 'POST', body: '{}' });
+  assert.equal(codexHealth.status, 'ready');
+  assert.equal(codexHealth.auth_status, 'ready');
+  assert.equal(codexHealth.version.includes('v'), true);
+  assert.equal(codexHealth.latency_ms >= 0, true);
+
+  const failedHealth = await api('/api/agents/antigravity/check', { method: 'POST', body: '{}' });
+  assert.equal(failedHealth.status, 'error');
+  assert.equal(failedHealth.auth_status, 'failed');
+  assert.equal(failedHealth.message.includes('abcdefghijklmnopqrstuvwxyz'), false);
+  assert.equal(failedHealth.message.includes('[REDACTED]'), true);
+
+  const healthRows = await api('/api/agents/health');
+  assert.equal(healthRows.find(item => item.agent === 'codex').status, 'ready');
+  assert.equal(healthRows.find(item => item.agent === 'antigravity').status, 'error');
+  assert.equal((await api('/api/state')).agentHealth.find(item => item.agent === 'codex').checked_at, codexHealth.checked_at);
+  assert.equal((await apiFailure('/api/agents/unknown/check', { method: 'POST', body: '{}' })).error.includes('supported'), true);
+
+  const fixtureConfigPath = join(fixture, '.aod.config.json');
+  const originalFixtureConfig = JSON.parse(await readFile(fixtureConfigPath, 'utf8'));
+  const changedFixtureConfig = structuredClone(originalFixtureConfig);
+  changedFixtureConfig.agents.codex.command = `${process.execPath}.changed`;
+  await writeFile(fixtureConfigPath, JSON.stringify(changedFixtureConfig));
+  const staleHealth = (await api('/api/agents/health')).find(item => item.agent === 'codex');
+  assert.equal(staleHealth.status, 'not_checked');
+  assert.equal(staleHealth.command, changedFixtureConfig.agents.codex.command);
+  await writeFile(fixtureConfigPath, JSON.stringify(originalFixtureConfig));
 
   await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'manual', maxConcurrency: 2 }) });
   const first = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Manual task', agent: 'codex', files: ['README.md'], acceptance: 'node --check server.mjs' }) });

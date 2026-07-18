@@ -140,6 +140,18 @@ db.exec(`
     stream TEXT NOT NULL,
     message TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS agent_health_checks (
+    agent TEXT PRIMARY KEY,
+    configured INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    command TEXT,
+    resolved_path TEXT,
+    version TEXT,
+    auth_status TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS agent_groups (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -598,6 +610,117 @@ async function loadConfig() {
   if (!config) throw new Error('The AOD adapter config is not valid JSON.');
   return { agents: {}, defaults: {}, ...config };
 }
+
+function configuredAgentCommands() {
+  if (!existsSync(configPath)) return new Map();
+  const config = json(readFileSync(configPath, 'utf8'), {});
+  return new Map(Object.entries(config?.agents || {}).map(([agent, adapter]) => [agent, typeof adapter?.command === 'string' ? adapter.command : null]));
+}
+
+function listAgentHealth() {
+  const configured = configuredAgentCommands();
+  const saved = new Map(db.prepare('SELECT * FROM agent_health_checks').all().map(row => [row.agent, row]));
+  return agents.map(agent => {
+    const row = saved.get(agent);
+    const currentCommand = configured.get(agent);
+    const isConfigured = typeof currentCommand === 'string';
+    if (row && isConfigured && row.command === currentCommand) return { ...row, configured: true };
+    return {
+      agent,
+      configured: isConfigured,
+      status: isConfigured ? 'not_checked' : 'unconfigured',
+      command: currentCommand || null,
+      resolved_path: null,
+      version: null,
+      auth_status: 'not_checked',
+      latency_ms: 0,
+      message: isConfigured ? 'Run a connection check.' : 'Adapter is not configured.',
+      checked_at: null
+    };
+  });
+}
+
+function saveAgentHealth(result) {
+  db.prepare(`INSERT INTO agent_health_checks(agent, configured, status, command, resolved_path, version, auth_status, latency_ms, message, checked_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(agent) DO UPDATE SET configured = excluded.configured, status = excluded.status, command = excluded.command,
+      resolved_path = excluded.resolved_path, version = excluded.version, auth_status = excluded.auth_status,
+      latency_ms = excluded.latency_ms, message = excluded.message, checked_at = excluded.checked_at`)
+    .run(result.agent, result.configured ? 1 : 0, result.status, result.command, result.resolved_path, result.version,
+      result.auth_status, result.latency_ms, result.message, result.checked_at);
+  const saved = { ...db.prepare('SELECT * FROM agent_health_checks WHERE agent = ?').get(result.agent), configured: Boolean(result.configured) };
+  broadcast('agent_health', saved);
+  appendEvent('agent_health', `${result.agent}: ${result.status}${result.message ? ` / ${result.message}` : ''}`);
+  return saved;
+}
+
+async function resolveAgentCommand(command, timeoutMs) {
+  if (existsSync(command)) return resolve(command);
+  const lookup = process.platform === 'win32'
+    ? await run('where.exe', [command], root, timeoutMs)
+    : await run('which', [command], root, timeoutMs);
+  const path = `${lookup.stdout}\n${lookup.stderr}`.split(/\r?\n/).map(value => value.trim()).find(Boolean);
+  if (!path) throw new Error(`Executable was not found: ${command}`);
+  return path;
+}
+
+async function checkAgentHealth(agent) {
+  if (!agents.includes(agent)) throw new Error('Choose a supported agent adapter.');
+  const startedAt = Date.now();
+  const checkedAt = now();
+  const config = await loadConfig();
+  const adapter = config.agents?.[agent];
+  const base = {
+    agent,
+    configured: Boolean(adapter),
+    status: 'unconfigured',
+    command: typeof adapter?.command === 'string' ? adapter.command : null,
+    resolved_path: null,
+    version: null,
+    auth_status: 'not_checked',
+    latency_ms: 0,
+    message: 'Adapter is not configured.',
+    checked_at: checkedAt
+  };
+  if (!adapter || typeof adapter.command !== 'string') {
+    base.latency_ms = Date.now() - startedAt;
+    return saveAgentHealth(base);
+  }
+
+  const health = adapter.health && typeof adapter.health === 'object' ? adapter.health : {};
+  const timeoutMs = Math.max(1000, Math.min(60000, Number(health.timeoutMs || 10000)));
+  try {
+    base.resolved_path = await resolveAgentCommand(adapter.command, timeoutMs);
+    const versionArgs = health.versionArgs === undefined ? ['--version'] : health.versionArgs;
+    if (!Array.isArray(versionArgs)) throw new Error('health.versionArgs must be an array.');
+    const versionResult = await run(adapter.command, versionArgs.map(String), root, timeoutMs);
+    base.version = redactSecrets(`${versionResult.stdout}\n${versionResult.stderr}`).trim().split(/\r?\n/).find(Boolean)?.slice(0, 500) || 'available';
+    base.status = 'warning';
+    base.auth_status = 'unknown';
+    base.message = 'Executable is ready; authentication probe is not configured.';
+
+    if (health.authArgs !== undefined) {
+      if (!Array.isArray(health.authArgs)) throw new Error('health.authArgs must be an array.');
+      try {
+        await run(adapter.command, health.authArgs.map(String), root, timeoutMs);
+        base.status = 'ready';
+        base.auth_status = 'ready';
+        base.message = 'Executable and authentication probes passed.';
+      } catch (error) {
+        base.status = 'error';
+        base.auth_status = 'failed';
+        base.message = redactSecrets(error instanceof Error ? error.message : 'Authentication probe failed.').slice(-2000);
+      }
+    }
+  } catch (error) {
+    base.status = 'error';
+    base.auth_status = base.auth_status === 'failed' ? 'failed' : 'not_checked';
+    base.message = redactSecrets(error instanceof Error ? error.message : 'Agent connection check failed.').slice(-2000);
+  }
+  base.latency_ms = Date.now() - startedAt;
+  return saveAgentHealth(base);
+}
+
 function expand(value, task, prompt, promptFile = join(handoffDir, `${task.id}.md`)) {
   return String(value).replaceAll('{{taskId}}', task.id).replaceAll('{{worktree}}', task.worktree || '').replaceAll('{{promptFile}}', promptFile).replaceAll('{{prompt}}', prompt);
 }
@@ -1656,7 +1779,7 @@ function publicState() {
   }));
   return {
     workspace: basename(root), mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
-    agents, statuses, transitions, tasks, runs, groups, groupSessions, reviews: listReviews(),
+    agents, agentHealth: listAgentHealth(), statuses, transitions, tasks, runs, groups, groupSessions, reviews: listReviews(),
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
     runtime: { activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size, activeRoleProcesses: roleProcesses.size, activePlanners: plannerProcesses.size, recoveryRequired: tasks.filter(task => task.status === 'recovery_required').length + groupSessions.filter(session => session.status === 'recovery_required').length },
     stats: { total: tasks.length, runs: runs.length, groups: groups.length, groupSessions: groupSessions.length, worktrees: tasks.filter(task => task.worktree).length, mergeReady: tasks.filter(task => task.status === 'merge_ready').length, conflicts: tasks.filter(task => task.status === 'conflict_review').length }
@@ -1680,6 +1803,9 @@ async function api(request, response, url) {
   }
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
   if (request.method === 'GET' && url.pathname === '/api/github/status') return send(response, 200, await githubStatus());
+  if (request.method === 'GET' && url.pathname === '/api/agents/health') return send(response, 200, listAgentHealth());
+  const agentHealthMatch = url.pathname.match(/^\/api\/agents\/([a-z0-9-]+)\/check$/i);
+  if (agentHealthMatch && request.method === 'POST') return send(response, 200, await checkAgentHealth(agentHealthMatch[1]));
   if (url.pathname === '/api/groups') {
     if (request.method === 'GET') return send(response, 200, listGroups());
     if (request.method === 'POST') return send(response, 201, createGroup(await body(request)));
