@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, apiModule, layoutModule, contextDockModule, runCenterModule, groupConsoleModule, dialogsModule, server, readme, configExampleText] = await Promise.all([
+const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, apiModule, layoutModule, contextDockModule, runCenterModule, groupConsoleModule, dialogsModule, workspaceModule, server, readme, configExampleText] = await Promise.all([
   readFile(new URL('./index.html', import.meta.url), 'utf8'),
   readFile(new URL('./styles.css', import.meta.url), 'utf8'),
   readFile(new URL('./styles/tokens.css', import.meta.url), 'utf8'),
@@ -15,6 +15,7 @@ const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, 
   readFile(new URL('./ui/run-center.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/group-console.js', import.meta.url), 'utf8'),
   readFile(new URL('./ui/dialogs.js', import.meta.url), 'utf8'),
+  readFile(new URL('./ui/workspaces.js', import.meta.url), 'utf8'),
   readFile(new URL('./server.mjs', import.meta.url), 'utf8'),
   readFile(new URL('./README.md', import.meta.url), 'utf8'),
   readFile(new URL('./aod.config.example.json', import.meta.url), 'utf8')
@@ -28,6 +29,15 @@ for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'i
 for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCount', 'contextDockViewport']) {
   assert.equal(html.includes(`id="${id}"`), true, `Adaptive workbench is missing #${id}.`);
 }
+for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'validateWorkspace', 'selectWorkspace']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Workspace selection is missing #${id}.`);
+}
+assert.equal(script.includes('createWorkspaceController'), true, 'The app must initialize the workspace controller.');
+for (const endpoint of ['/api/workspaces', '/api/workspaces/validate', '/api/filesystem/directories']) {
+  assert.equal(workspaceModule.includes(endpoint), true, `Workspace UI is missing ${endpoint}.`);
+}
+assert.equal(workspaceModule.includes('/select'), true, 'Workspace UI must select a validated registered project.');
+assert.equal(script.includes('workspace-badge'), true, 'Entity views must expose bound workspace badges.');
 for (const tab of ['discussion', 'task', 'acceptance']) {
   assert.equal(html.includes(`data-context-tab="${tab}"`), true, `Context dock is missing the ${tab} tab.`);
   assert.equal(html.includes(`data-context-panel="${tab}"`), true, `Context dock is missing the ${tab} panel.`);

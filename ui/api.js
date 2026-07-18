@@ -14,7 +14,7 @@ export function connectStream({ onEvent, onConnection }) {
     const suffix = lastEventId ? `?after=${encodeURIComponent(lastEventId)}` : '';
     source = new EventSource(`/api/stream${suffix}`);
     source.onopen = () => onConnection('online');
-    for (const type of ['state', 'event', 'log', 'group_session', 'group_turn', 'group_message', 'task_role']) {
+    for (const type of ['state', 'event', 'log', 'workspace', 'group_session', 'group_turn', 'group_message', 'task_role']) {
       source.addEventListener(type, event => {
         // Native EventSource uses Last-Event-ID during transport reconnects; this cursor also survives page reloads.
         if (event.lastEventId) {

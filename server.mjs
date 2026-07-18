@@ -2280,7 +2280,13 @@ async function cleanupTerminalWorktrees() {
 }
 
 function currentApprovals() {
-  return buildApprovalInbox({ tasks: listTasks(), runs: listRuns(), reviews: listReviews(), groupSessions: listGroupSessions() });
+  return buildApprovalInbox({ tasks: listTasks(), runs: listRuns(), reviews: listReviews(), groupSessions: listGroupSessions() }).map(item => {
+    const entity = item.entityType === 'task' ? getTask(item.entityId)
+      : item.entityType === 'run' ? getRun(item.entityId)
+        : item.entityType === 'group_session' ? getGroupSession(item.entityId)
+          : item.entityType === 'review' ? getTask(getReview(item.entityId)?.task_id) : null;
+    return { ...item, ...workspaceIdentity(getWorkspace(entity?.workspace_id)) };
+  });
 }
 
 async function executeApprovalAction(payload) {
@@ -2309,13 +2315,14 @@ function publicState() {
     id: session.id, group_id: session.group_id, requirement: session.requirement, status: session.status,
     current_round: session.current_round, max_rounds: session.max_rounds, max_repairs: session.max_repairs,
     member_count: session.members.length, title: session.consensus?.title || null, run_id: session.run_id,
-    recovery_note: session.recovery_note, created_at: session.created_at, updated_at: session.updated_at
+    recovery_note: session.recovery_note, created_at: session.created_at, updated_at: session.updated_at,
+    workspaceId: session.workspaceId, workspaceName: session.workspaceName, workspacePath: session.workspacePath
   }));
   return {
     workspace: selectedWorkspace.name, activeWorkspaceId: selectedWorkspace.id, workspaces: listWorkspaces(),
     mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
-    agents, agentHealth: listAgentHealth(), approvals: buildApprovalInbox({ tasks, runs, reviews, groupSessions }), metrics, statuses, transitions, tasks, runs, groups, groupSessions, reviews,
-    events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
+    agents, agentHealth: listAgentHealth(), approvals: currentApprovals(), metrics, statuses, transitions, tasks, runs, groups, groupSessions, reviews,
+    events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all().map(withWorkspaceIdentity),
     runtime: {
       activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size,
       activeRoleProcesses: roleProcesses.size, activePlanners: plannerProcesses.size,
@@ -2511,7 +2518,7 @@ const publicFiles = new Set([
   'styles/tokens.css', 'styles/shell.css', 'styles/components.css', 'styles/views.css',
   'ui/api.js', 'ui/state.js', 'ui/layout-state.js', 'ui/layout.js', 'ui/context-dock.js',
   'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js',
-  'ui/run-center.js', 'ui/group-console.js', 'ui/dialogs.js'
+  'ui/run-center.js', 'ui/group-console.js', 'ui/dialogs.js', 'ui/workspaces.js'
 ]);
 async function staticFile(response, pathname) {
   const file = pathname === '/' ? 'index.html' : pathname.slice(1);

@@ -4,6 +4,7 @@ import { createLayout } from './ui/layout.js';
 import { createRunCenter } from './ui/run-center.js';
 import { createGroupConsole } from './ui/group-console.js';
 import { createDialogs } from './ui/dialogs.js';
+import { createWorkspaceController } from './ui/workspaces.js';
 import { buildSearchIndex, searchEntities } from './ui/command-search.js';
 import { createActionState } from './ui/action-feedback.js';
 import { deriveNextAction, deriveRunStage } from './ui/run-stage.js';
@@ -74,6 +75,7 @@ const layout = createLayout({
 const contextDock = layout.contextDock;
 const groupConsoleUi = createGroupConsole({ root: groupConsole });
 const dialogsUi = createDialogs();
+const workspaceUi = createWorkspaceController({ root: document, request, onSelected: () => refresh(), onError: error => tell(error.message, 'error') });
 const runCenterUi = createRunCenter({
   root: $('#contextInspector'), request, tell, onRefresh: refresh, getSelectedTask: selectedTask,
   onContext: (tab, taskId) => contextDock.open(tab, taskId),
@@ -93,6 +95,10 @@ function tell(message, kind = '') {
   noticeTimer = setTimeout(() => { notice.className = 'notice'; }, 4200);
 }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]); }
+function workspaceBadge(entity) {
+  if (!entity?.workspaceId) return '';
+  return `<span class="workspace-badge" title="${escapeHtml(entity.workspacePath || '')}">${escapeHtml(entity.workspaceName || entity.workspaceId)}</span>`;
+}
 function statusLabel(status) { return statusLabels[status] || status; }
 function modeLabel(mode) { return { manual: '人工', hybrid: '混合', auto: '自动' }[mode] || mode; }
 function activeReview() { return state?.reviews.find(review => ['pending', 'running', 'suggested', 'failed'].includes(review.status)) || null; }
@@ -172,7 +178,7 @@ function renderRuns() {
     const merged = tasks.filter(task => task.status === 'merged').length;
     const publish = run.status === 'ready_to_publish' ? `<button class="small primary" data-action-key="run:${run.id}:publish" data-run-action="publish" data-run-id="${run.id}">发布 PR</button>` : '';
     const refresh = run.github_pr_number ? `<button class="small secondary" data-action-key="run:${run.id}:refresh" data-run-action="refresh" data-run-id="${run.id}">刷新 CI</button>` : '';
-    return `<article class="run-card status-${run.status}"><div class="task-meta"><span>${run.id}</span><span>${modeLabel(run.mode)}</span></div><h3>${escapeHtml(run.title)}</h3><p>${escapeHtml(run.requirement)}</p><div class="run-meta"><span>${merged}/${tasks.length} 已合并</span><span>${escapeHtml(run.integration_branch)}</span><span>CI: ${escapeHtml(run.ci_status)}</span></div><div class="task-foot"><strong>${escapeHtml(run.status)}</strong><div>${publish}${refresh}${run.github_pr_url ? `<a class="small secondary" href="${escapeHtml(run.github_pr_url)}" target="_blank" rel="noreferrer">打开 PR</a>` : ''}</div></div></article>`;
+    return `<article class="run-card status-${run.status}"><div class="task-meta"><span>${run.id}</span><span>${modeLabel(run.mode)}</span>${workspaceBadge(run)}</div><h3>${escapeHtml(run.title)}</h3><p>${escapeHtml(run.requirement)}</p><div class="run-meta"><span>${merged}/${tasks.length} 已合并</span><span>${escapeHtml(run.integration_branch)}</span><span>CI: ${escapeHtml(run.ci_status)}</span></div><div class="task-foot"><strong>${escapeHtml(run.status)}</strong><div>${publish}${refresh}${run.github_pr_url ? `<a class="small secondary" href="${escapeHtml(run.github_pr_url)}" target="_blank" rel="noreferrer">打开 PR</a>` : ''}</div></div></article>`;
   }).join('');
 }
 
@@ -180,7 +186,7 @@ function renderBoard() {
   if (!state.tasks.length) { board.innerHTML = '<p class="empty">还没有任务。创建一个具有清晰文件边界的工作单元。</p>'; return; }
   board.innerHTML = state.tasks.map(task => `
     <article class="task-card status-${task.status} ${task.id === selectedTaskId ? 'selected' : ''}" data-select="${task.id}">
-      <div class="task-meta"><span>${task.id}</span><span>${escapeHtml(task.agent)}</span></div>
+      <div class="task-meta"><span>${task.id}</span><span>${escapeHtml(task.agent)}</span>${workspaceBadge(task)}</div>
       <h3>${escapeHtml(task.title)}</h3>
       <p class="paths">${task.files.map(escapeHtml).join('<br>')}</p>
       <div class="task-info"><span>依赖：${task.dependsOn.length ? task.dependsOn.join(', ') : '无'}</span><span>尝试：${task.attempts}/${task.max_retries}</span>${task.worktree ? `<span title="${escapeHtml(task.worktree)}">worktree 已就绪</span>` : ''}</div>
@@ -201,7 +207,7 @@ function renderDetail() {
   }
   runCenterUi.setOutput(task.output || '等待 Agent 输出。');
   $('#verificationResult').innerHTML = task.verification ? `<span>验收：${escapeHtml(task.verification.command)}</span><b>${escapeHtml(task.verification.commit || '')}</b><pre>${escapeHtml(task.verification.output)}</pre>` : '';
-  $('#inspectorOverview').innerHTML = `<dl class="task-overview-grid"><div><dt>Agent</dt><dd>${escapeHtml(task.agent)}</dd></div><div><dt>状态</dt><dd>${statusLabel(task.status)}</dd></div><div><dt>Commit</dt><dd>${shortCommit(task.verified_commit)}</dd></div><div><dt>分支</dt><dd>${escapeHtml(task.branch || '—')}</dd></div><div class="wide"><dt>Worktree</dt><dd title="${escapeHtml(task.worktree || '')}">${escapeHtml(task.worktree || '尚未准备')}</dd></div><div class="wide"><dt>文件范围</dt><dd>${task.files.map(escapeHtml).join(', ')}</dd></div></dl><div class="inspector-actions">${taskActions(task) || '<span class="empty-inline">当前没有可执行操作</span>'}</div>`;
+  $('#inspectorOverview').innerHTML = `<dl class="task-overview-grid"><div><dt>Agent</dt><dd>${escapeHtml(task.agent)}</dd></div><div><dt>状态</dt><dd>${statusLabel(task.status)}</dd></div><div><dt>Commit</dt><dd>${shortCommit(task.verified_commit)}</dd></div><div><dt>分支</dt><dd>${escapeHtml(task.branch || '—')}</dd></div><div class="wide"><dt>绑定项目</dt><dd title="${escapeHtml(task.workspacePath || '')}">${escapeHtml(task.workspaceName || task.workspaceId || '—')}</dd></div><div class="wide"><dt>Worktree</dt><dd title="${escapeHtml(task.worktree || '')}">${escapeHtml(task.worktree || '尚未准备')}</dd></div><div class="wide"><dt>文件范围</dt><dd>${task.files.map(escapeHtml).join(', ')}</dd></div></dl><div class="inspector-actions">${taskActions(task) || '<span class="empty-inline">当前没有可执行操作</span>'}</div>`;
 }
 
 function renderApprovals() {
@@ -224,7 +230,7 @@ function renderApprovals() {
       return `<button class="small ${item.risk === 'high' ? 'warn' : 'primary'}" type="button" data-action-key="approval:${escapeHtml(item.id)}:${escapeHtml(action)}" data-approval-action="${escapeHtml(action)}" data-approval-id="${escapeHtml(item.id)}">${actionCopy[action] || escapeHtml(action)}</button>`;
     }).join('');
     return `<article class="approval-row risk-${escapeHtml(item.risk)}">
-      <div class="approval-kind"><span>${escapeHtml(kindCopy[item.kind] || item.kind)}</span><b>${escapeHtml(item.entityId)}</b></div>
+      <div class="approval-kind"><span>${escapeHtml(kindCopy[item.kind] || item.kind)}</span><b>${escapeHtml(item.entityId)}</b>${workspaceBadge(item)}</div>
       <div class="approval-copy"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.description)}</p></div>
       <div class="approval-meta"><span>${item.runId ? escapeHtml(item.runId) : 'LOCAL'}</span><time>${item.createdAt ? new Date(item.createdAt).toLocaleString() : '—'}</time></div>
       <div class="approval-actions">${actions}</div>
@@ -387,7 +393,7 @@ function renderGroups() {
     const members = group.members || [];
     const roster = members.map(member => `<span class="group-role"><b>${escapeHtml(member.display_name)}</b><i>${escapeHtml(roleLabels[member.role] || member.role)}</i>${member.is_moderator ? '<em>主持</em>' : ''}</span>`).join('');
     const latestCopy = latest
-      ? `<div class="group-latest"><span>${escapeHtml(latest.id)} / ${statusLabel(latest.status)}</span><strong>ROUND ${latest.current_round}/${latest.max_rounds}</strong><p>${escapeHtml(latest.title || latest.requirement)}</p></div>`
+      ? `<div class="group-latest"><span>${escapeHtml(latest.id)} / ${statusLabel(latest.status)} ${workspaceBadge(latest)}</span><strong>ROUND ${latest.current_round}/${latest.max_rounds}</strong><p>${escapeHtml(latest.title || latest.requirement)}</p></div>`
       : '<div class="group-latest empty-session"><span>NO SESSION</span><p>尚未创建会话</p></div>';
     return `<article class="group-card status-${escapeHtml(latest?.status || 'idle')}">
       <div class="task-meta"><span>${escapeHtml(group.id)}</span><span>${members.length} MEMBERS</span></div>
@@ -572,6 +578,7 @@ function render(nextState, health) {
   state = nextState;
   store.setState({ data: nextState, health, selection: { taskId: selectedTaskId, groupId: selectedGroupId, sessionId: selectedGroupSessionId } });
   $('#workspace').textContent = state.workspace;
+  workspaceUi.render(state);
   $('#health').textContent = health.gitReady ? `Daemon online / ${state.integrationBranch}` : 'Git baseline required';
   $('#health').classList.toggle('warning', !health.gitReady);
   $('#modeDescription').textContent = modeCopy[state.mode];

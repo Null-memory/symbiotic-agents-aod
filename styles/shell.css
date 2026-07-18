@@ -29,6 +29,11 @@ button{cursor:pointer}
 .app-topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;min-width:0;padding:0 18px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.94)}
 .topbar-context{display:flex;min-width:0;align-items:center;gap:12px}.topbar-context strong{white-space:nowrap}.topbar-context span{min-width:0;overflow:hidden;color:var(--text-muted);font:11px var(--font-mono);text-overflow:ellipsis;white-space:nowrap}
 .topbar-controls{display:flex;align-items:center;gap:8px;white-space:nowrap}.health{color:var(--accent);font:10px var(--font-mono)}.health.warning{color:var(--warning)}
+.workspace-selector{display:grid;grid-template-columns:9px minmax(0,1fr) 14px;align-items:center;gap:8px;width:210px;height:38px;padding:0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-panel);color:var(--text-primary);text-align:left;transition:border-color var(--motion-fast),background var(--motion-fast),transform var(--motion-fast)}
+.workspace-selector:hover{border-color:var(--accent);background:var(--surface-subtle)}.workspace-selector:active{transform:translateY(1px)}
+.workspace-selector-copy{display:grid;min-width:0;gap:1px}.workspace-selector-copy strong,.workspace-selector-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.workspace-selector-copy strong{font-size:11px}.workspace-selector-copy small{color:var(--text-muted);font:9px var(--font-mono)}
+.workspace-selector-signal,.workspace-state-dot{width:8px;height:8px;border-radius:50%;background:var(--danger);box-shadow:0 0 0 3px rgba(184,63,54,.1)}.workspace-selector-signal.status-ready,.workspace-state-dot.status-ready{background:var(--accent);box-shadow:0 0 0 3px rgba(8,127,117,.11)}.workspace-selector-signal.is-dirty,.workspace-state-dot.is-dirty{background:var(--warning);box-shadow:0 0 0 3px rgba(183,122,24,.12)}
+.workspace-selector-chevron{color:var(--text-muted);font-size:14px;text-align:right}
 .view-mode-switch{position:relative;margin-right:4px}.view-mode-switch::after{position:absolute;top:3px;right:-7px;width:1px;height:24px;background:var(--border);content:""}
 .workspace-main{min-width:0;overflow:auto;container-type:inline-size;scrollbar-gutter:stable}
 .workspace-view{display:none;min-height:100%;padding:18px}.workspace-view.active{display:block;animation:view-enter 200ms cubic-bezier(.22,1,.36,1) both}
@@ -75,5 +80,5 @@ button{cursor:pointer}
 .is-inspector-collapsed .inspector-reopen{display:flex;animation:rail-enter var(--motion-close) ease-out both}
 @keyframes context-reveal{from{opacity:0;transform:translateX(5px)}to{opacity:1;transform:translateX(0)}}
 @keyframes rail-enter{from{opacity:0}to{opacity:1}}
-@media(max-width:1500px){.topbar-context,.topbar-controls .health{display:none}.topbar-controls{width:100%}.command-search{flex:1;width:auto}.app-topbar{padding:0 10px}}
+@media(max-width:1500px){.topbar-context,.topbar-controls .health{display:none}.topbar-controls{width:100%}.command-search{flex:1;width:auto}.workspace-selector{width:190px}.app-topbar{padding:0 10px}}
 @media(prefers-reduced-motion:reduce){.context-panel,.inspector-reopen{animation:none!important}.app-shell,.context-inspector{transition:none!important}}

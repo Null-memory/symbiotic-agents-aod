@@ -9,11 +9,11 @@ function item({ id, type, title, meta, route, contextTab = null, entityId = id }
 export function buildSearchIndex({ runs = [], tasks = [], groups = [], groupSessions = [], adapters = [] } = {}) {
   return [
     ...runs.map(run => item({
-      id: run.id, type: 'run', title: run.title || run.id, meta: `${run.status || ''} ${run.integration_branch || ''}`,
+      id: run.id, type: 'run', title: run.title || run.id, meta: `${run.status || ''} ${run.integration_branch || ''} ${run.workspaceName || ''} ${run.workspacePath || ''}`,
       route: { view: 'runs', runId: run.id }
     })),
     ...tasks.map(task => item({
-      id: task.id, type: 'task', title: task.title || task.id, meta: `${task.status || ''} ${task.agent || ''} ${(task.files || []).join(' ')}`,
+      id: task.id, type: 'task', title: task.title || task.id, meta: `${task.status || ''} ${task.agent || ''} ${(task.files || []).join(' ')} ${task.workspaceName || ''} ${task.workspacePath || ''}`,
       route: { view: 'tasks', runId: task.run_id || null, taskId: task.id }, contextTab: 'task'
     })),
     ...groups.map(group => item({
@@ -21,7 +21,7 @@ export function buildSearchIndex({ runs = [], tasks = [], groups = [], groupSess
       route: { view: 'groups' }
     })),
     ...groupSessions.map(session => item({
-      id: session.id, type: 'session', title: session.title || session.requirement || session.id, meta: `${session.status || ''} ${session.group_id || ''}`,
+      id: session.id, type: 'session', title: session.title || session.requirement || session.id, meta: `${session.status || ''} ${session.group_id || ''} ${session.workspaceName || ''} ${session.workspacePath || ''}`,
       route: { view: 'groups', sessionId: session.id }, contextTab: 'discussion'
     })),
     ...adapters.map(adapter => {

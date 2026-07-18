@@ -25,6 +25,11 @@
         <header class="app-topbar" id="appTopbar">
           <div class="topbar-context"><strong>多 Agent 协同工作区</strong><span id="workspace">Loading workspace</span></div>
           <div class="topbar-controls">
+            <button class="workspace-selector" id="workspaceSelector" type="button" title="选择默认项目工作区">
+              <span class="workspace-selector-signal" id="workspaceSelectorSignal" aria-hidden="true"></span>
+              <span class="workspace-selector-copy"><strong id="workspaceSelectorName">选择项目</strong><small id="workspaceSelectorMeta">未加载</small></span>
+              <span class="workspace-selector-chevron" aria-hidden="true">⌄</span>
+            </button>
             <div class="command-search" role="search">
               <input id="commandSearch" type="search" autocomplete="off" placeholder="搜索运行、任务、群组" aria-label="全局搜索" />
               <div class="command-search-results" id="commandSearchResults" role="listbox" hidden></div>
@@ -156,6 +161,20 @@
         </div>
       </aside>
     </div>
+
+    <dialog class="workspace-dialog" id="workspaceDialog" aria-labelledby="workspaceDialogTitle">
+      <div class="dialog-head"><div><p class="kicker">PROJECT WORKSPACES</p><h2 id="workspaceDialogTitle">选择本机项目</h2></div><button class="icon-button" id="closeWorkspaceDialog" type="button" aria-label="关闭">×</button></div>
+      <div class="workspace-dialog-grid">
+        <section class="workspace-registry" aria-labelledby="workspaceRegistryTitle"><div class="workspace-dialog-section-head"><span>REGISTERED</span><strong id="workspaceRegistryTitle">已注册项目</strong></div><div class="workspace-list" id="workspaceList"></div></section>
+        <section class="workspace-picker" aria-labelledby="workspacePickerTitle">
+          <div class="workspace-dialog-section-head"><span>LOCAL DIRECTORY</span><strong id="workspacePickerTitle">浏览或输入绝对路径</strong></div>
+          <div class="workspace-path-row"><input id="workspacePath" type="text" autocomplete="off" spellcheck="false" placeholder="C:\path\to\git-project" aria-label="项目绝对路径" /><button class="secondary" id="validateWorkspace" type="button">验证</button></div>
+          <div class="workspace-browser" id="workspaceBrowser" aria-label="服务器目录浏览"></div>
+          <div class="workspace-validation" id="workspaceValidation"><p>选择一个包含至少一次提交的 Git 仓库。</p></div>
+        </section>
+      </div>
+      <div class="dialog-actions"><button class="secondary" id="cancelWorkspace" type="button">取消</button><button class="primary" id="selectWorkspace" type="button" disabled>注册并选择</button></div>
+    </dialog>
 
     <dialog id="taskDialog" aria-labelledby="taskDialogTitle">
       <form method="dialog" id="taskForm"><div class="dialog-head"><div><p class="kicker">NEW UNIT OF WORK</p><h2 id="taskDialogTitle">新建协同任务</h2></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><label>任务标题<input name="title" required maxlength="100" placeholder="例如：实现任务恢复 API" /></label><label>执行 Agent<select name="agent"><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">反重力 2.0</option></select></label><label>拥有的文件或目录<input name="files" required placeholder="server.mjs, src/api" /></label><label>依赖任务<select name="dependsOn" id="dependsOn"><option value="">无</option></select></label><label>验收命令<input name="acceptance" placeholder="npm run check" /></label><div class="form-row"><label>超时分钟<input name="timeoutMinutes" type="number" min="1" max="180" value="30" /></label><label>自动重试<input name="maxRetries" type="number" min="0" max="3" value="0" /></label></div><div class="dialog-actions"><button class="secondary" value="cancel">取消</button><button class="primary" value="default">创建任务</button></div></form>
