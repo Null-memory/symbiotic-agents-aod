@@ -8,7 +8,7 @@ import { basename, dirname, extname, join, normalize, resolve } from 'node:path'
 import { buildApprovalInbox } from './approval-domain.mjs';
 import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
-import { classifyInterruptedProcess } from './process-domain.mjs';
+import { buildProcessMetrics, classifyInterruptedProcess } from './process-domain.mjs';
 
 const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
@@ -527,6 +527,22 @@ function listAgentProcesses({ limit = 100, runId = null } = {}) {
     ? db.prepare('SELECT * FROM agent_processes WHERE run_id = ? ORDER BY started_at DESC LIMIT ?').all(runId, boundedLimit)
     : db.prepare('SELECT * FROM agent_processes ORDER BY started_at DESC LIMIT ?').all(boundedLimit);
   return rows.map(processFromRow);
+}
+
+function processMetrics({ from = null, to = null, runId = null } = {}) {
+  const toMs = to ? Date.parse(to) : Date.now();
+  if (!Number.isFinite(toMs)) throw new Error('Metrics "to" must be a valid timestamp.');
+  const fromMs = from ? Date.parse(from) : toMs - 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(fromMs)) throw new Error('Metrics "from" must be a valid timestamp.');
+  if (fromMs >= toMs) throw new Error('Metrics "from" must be earlier than "to".');
+  if (toMs - fromMs > 90 * 24 * 60 * 60 * 1000) throw new Error('Metrics range cannot exceed 90 days.');
+  if (runId && !getRun(runId)) throw new Error(`Run ${runId} was not found.`);
+  const fromIso = new Date(fromMs).toISOString();
+  const toIso = new Date(toMs).toISOString();
+  const rows = runId
+    ? db.prepare(`SELECT * FROM agent_processes WHERE run_id = ? AND started_at < ? AND COALESCE(finished_at, ?) > ? ORDER BY started_at ASC`).all(runId, toIso, toIso, fromIso)
+    : db.prepare(`SELECT * FROM agent_processes WHERE started_at < ? AND COALESCE(finished_at, ?) > ? ORDER BY started_at ASC`).all(toIso, toIso, fromIso);
+  return buildProcessMetrics(rows, { from: fromIso, to: toIso, runId, maxConcurrency: maxConcurrency() });
 }
 
 function leaseExpiry(at = Date.now()) { return new Date(at + processLeaseMs).toISOString(); }
@@ -2003,6 +2019,7 @@ function publicState() {
   const runs = listRuns();
   const groups = listGroups();
   const reviews = listReviews();
+  const metrics = processMetrics();
   const groupSessions = listGroupSessions().map(session => ({
     id: session.id, group_id: session.group_id, requirement: session.requirement, status: session.status,
     current_round: session.current_round, max_rounds: session.max_rounds, max_repairs: session.max_repairs,
@@ -2011,7 +2028,7 @@ function publicState() {
   }));
   return {
     workspace: basename(root), mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
-    agents, agentHealth: listAgentHealth(), approvals: buildApprovalInbox({ tasks, runs, reviews, groupSessions }), statuses, transitions, tasks, runs, groups, groupSessions, reviews,
+    agents, agentHealth: listAgentHealth(), approvals: buildApprovalInbox({ tasks, runs, reviews, groupSessions }), metrics, statuses, transitions, tasks, runs, groups, groupSessions, reviews,
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
     runtime: {
       activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size,
@@ -2040,6 +2057,7 @@ async function api(request, response, url) {
   }
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
   if (request.method === 'GET' && url.pathname === '/api/processes') return send(response, 200, listAgentProcesses({ limit: url.searchParams.get('limit'), runId: url.searchParams.get('runId') }));
+  if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, processMetrics({ from: url.searchParams.get('from'), to: url.searchParams.get('to'), runId: url.searchParams.get('runId') }));
   if (request.method === 'GET' && url.pathname === '/api/github/status') return send(response, 200, await githubStatus());
   if (request.method === 'GET' && url.pathname === '/api/approvals') return send(response, 200, currentApprovals());
   if (request.method === 'POST' && url.pathname === '/api/approvals/action') return send(response, 200, await executeApprovalAction(await body(request)));

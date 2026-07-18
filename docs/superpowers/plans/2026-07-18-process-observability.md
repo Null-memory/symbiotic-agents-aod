@@ -61,12 +61,12 @@
 - Modify: `server.mjs`
 - Modify: `test.mjs`
 
-- [ ] Add integration assertions for `GET /api/metrics` default totals and `?runId=<id>` filtering, including completed, failed, and timed-out fixture invocations.
-- [ ] Run `node test.mjs` and confirm the endpoint is missing.
-- [ ] Build metrics from `agent_processes`, accepting bounded `from`, `to`, and `runId` query values and using the configured max concurrency as capacity.
-- [ ] Return `{ range, summary, adapters, runs, failures, concurrency }` with stable numeric fields and no raw prompts/output.
-- [ ] Include a compact metrics summary in `/api/state` for SSE refreshes.
-- [ ] Run integration and domain tests, then commit with `feat: expose agent runtime metrics`.
+- [x] Add integration assertions for `GET /api/metrics` default totals and `?runId=<id>` filtering, including completed, failed, and timed-out fixture invocations.
+- [x] Run `node test.mjs` and confirm the endpoint is missing.
+- [x] Build metrics from `agent_processes`, accepting bounded `from`, `to`, and `runId` query values and using the configured max concurrency as capacity.
+- [x] Return `{ range, summary, adapters, runs, failures, concurrency }` with stable numeric fields and no raw prompts/output.
+- [x] Include a compact metrics summary in `/api/state` for SSE refreshes.
+- [x] Run integration and domain tests, then commit with `feat: expose agent runtime metrics`.
 
 ### Task 5: Desktop Process And Metrics Views
 
@@ -77,11 +77,11 @@
 - Modify: `frontend-test.mjs`
 - Modify: `docs/USER_GUIDE.zh-CN.md`
 
-- [ ] Add failing frontend contract checks for `#processMonitor`, `#metricsBoard`, recovery-state labels, adapter metric rows, and runtime refresh rendering.
-- [ ] Run `node frontend-test.mjs` and confirm the new contracts fail.
-- [ ] Add a compact process monitor showing kind, Agent, linked entity, PID, heartbeat/output age, lease, and terminal/recovery state.
-- [ ] Add a metrics band showing invocation count, success/timeout rate, average duration, retries, peak concurrency/utilization, and per-adapter rows.
-- [ ] Keep process output and prompts out of the metrics view; link entities to existing detail views.
-- [ ] Verify the desktop layout at 1440x900 in real Google Chrome via CDP, check zero horizontal overflow, and save a screenshot under `.aod/`.
-- [ ] Run `npm test`, `npm run check`, and `git diff --check`.
-- [ ] Commit with `feat: add process observability dashboard`.
+- [x] Add failing frontend contract checks for `#processMonitor`, `#metricsBoard`, recovery-state labels, adapter metric rows, and runtime refresh rendering.
+- [x] Run `node frontend-test.mjs` and confirm the new contracts fail.
+- [x] Add a compact process monitor showing kind, Agent, linked entity, PID, heartbeat/output age, lease, and terminal/recovery state.
+- [x] Add a metrics band showing invocation count, success/timeout rate, average duration, retries, peak concurrency/utilization, and per-adapter rows.
+- [x] Keep process output and prompts out of the metrics view; link entities to existing detail views.
+- [x] Verify the desktop layout at 1440x900 in real Google Chrome via CDP, check zero horizontal overflow, and save a screenshot under `.aod/`.
+- [x] Run `npm test`, `npm run check`, and `git diff --check`.
+- [x] Commit with `feat: add process observability dashboard`.

@@ -53,6 +53,9 @@ const statusLabels = {
 const modeCopy = { manual: '每一步由操作者触发', hybrid: '自动准备与验收，人工启动与合并', auto: '自动准备、启动与验收，合并仍需人工确认' };
 const roleLabels = { executor: '执行', reviewer: '检查', fixer: '修复', advisor: '顾问' };
 const agentLabels = { codex: 'Codex', 'claude-code': 'Claude Code', antigravity: '反重力 2.0' };
+const processKindCopy = { task: '独立任务', group_turn: '群组回合', role_execute: '角色执行', role_review: '角色检查', role_repair: '角色修复', conflict_review: '冲突审查', planner: '需求规划' };
+const processStatusCopy = { running: '运行中', succeeded: '已完成', failed: '失败', timed_out: '已超时', cancelled: '已取消', recovery_required: '需恢复' };
+const recoveryStateCopy = { live: '进程仍存活', stale: '进程已失联', unverifiable: '状态无法确认' };
 const store = createStore({ data: null, health: null, selection: {} });
 const layout = createLayout({
   onRouteChange(route) {
@@ -161,6 +164,82 @@ function renderApprovals() {
       <div class="approval-copy"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.description)}</p></div>
       <div class="approval-meta"><span>${item.runId ? escapeHtml(item.runId) : 'LOCAL'}</span><time>${item.createdAt ? new Date(item.createdAt).toLocaleString() : '—'}</time></div>
       <div class="approval-actions">${actions}</div>
+    </article>`;
+  }).join('');
+}
+
+function formatDuration(milliseconds) {
+  const value = Math.max(0, Number(milliseconds) || 0);
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 60000) return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} s`;
+  if (value < 3600000) return `${(value / 60000).toFixed(1)} min`;
+  return `${(value / 3600000).toFixed(1)} h`;
+}
+
+function formatPercent(value) { return `${Math.round(Math.max(0, Number(value) || 0) * 100)}%`; }
+
+function relativeAge(value) {
+  const at = Date.parse(value || '');
+  if (!Number.isFinite(at)) return '无输出';
+  const age = Math.max(0, Date.now() - at);
+  if (age < 5000) return '刚刚';
+  if (age < 60000) return `${Math.floor(age / 1000)} 秒前`;
+  if (age < 3600000) return `${Math.floor(age / 60000)} 分钟前`;
+  return `${Math.floor(age / 3600000)} 小时前`;
+}
+
+function renderMetrics() {
+  const metrics = state.metrics;
+  const board = $('#metricsBoard');
+  if (!metrics?.summary) {
+    board.innerHTML = '<p class="empty">尚无可汇总的 Agent 运行记录。</p>';
+    return;
+  }
+  const summary = metrics.summary;
+  const elapsed = Math.max(0, Date.parse(metrics.range?.to) - Date.parse(metrics.range?.from));
+  $('#metricsWindow').textContent = elapsed ? `${Math.round(elapsed / 3600000)}H WINDOW` : 'CURRENT';
+  const cells = [
+    ['调用', summary.invocations, `${summary.active} ACTIVE`],
+    ['成功率', formatPercent(summary.successRate), `${summary.succeeded}/${summary.terminal} TERMINAL`],
+    ['超时率', formatPercent(summary.timeoutRate), `${summary.timedOut} TIMEOUT`],
+    ['平均耗时', formatDuration(summary.avgDurationMs), 'TERMINAL AVG'],
+    ['重试', summary.retries, `${summary.failed} FAILED`],
+    ['槽位利用率', formatPercent(metrics.concurrency?.utilization), `PEAK ${metrics.concurrency?.peak || 0}/${metrics.concurrency?.capacity || state.maxConcurrency}`]
+  ];
+  const summaryHtml = `<div class="metrics-summary">${cells.map(([label, value, meta]) => `<div class="metric-cell"><span>${label}</span><strong>${value}</strong><small>${meta}</small></div>`).join('')}</div>`;
+  const adapterHtml = metrics.adapters?.length
+    ? `<div class="metrics-adapters">${metrics.adapters.map(item => `<div class="metrics-adapter-row">
+        <div><span class="agent-signal status-${item.active ? 'running' : item.failed || item.timedOut ? 'warning' : 'succeeded'}"></span><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><small>${item.invocations} INVOCATIONS</small></div>
+        <div class="metric-bar"><i style="--metric-fill:${Math.min(100, Math.max(0, Number(item.successRate) * 100))}%"></i><span>${formatPercent(item.successRate)} 成功</span></div>
+        <span><b>${formatPercent(item.timeoutRate)}</b> 超时</span><span><b>${formatDuration(item.avgDurationMs)}</b> 均耗</span><span><b>${item.retries}</b> 重试</span>
+      </div>`).join('')}</div>`
+    : '<p class="empty">当前时间窗口没有适配器调用。</p>';
+  board.innerHTML = summaryHtml + adapterHtml;
+}
+
+function renderProcessMonitor() {
+  const processes = state.runtime?.processes || [];
+  $('#processCount').textContent = `${processes.length} RECENT`;
+  if (!processes.length) {
+    $('#processMonitor').innerHTML = '<p class="empty">当前没有 Agent 进程记录。</p>';
+    return;
+  }
+  $('#processMonitor').innerHTML = processes.map(item => {
+    const entity = item.task_id
+      ? `<button type="button" data-process-task="${escapeHtml(item.task_id)}">${escapeHtml(item.task_id)}</button>`
+      : item.session_id
+        ? `<button type="button" data-process-session="${escapeHtml(item.session_id)}">${escapeHtml(item.session_id)}</button>`
+        : `<span>${escapeHtml(item.entity_id)}</span>`;
+    const startedAt = Date.parse(item.started_at || '');
+    const finishedAt = Date.parse(item.finished_at || '') || Date.now();
+    const recovery = item.recovery_state ? recoveryStateCopy[item.recovery_state] || item.recovery_state : '';
+    const latestSignal = item.last_output_at || item.heartbeat_at;
+    return `<article class="process-row status-${escapeHtml(item.status)}" title="${escapeHtml(item.id)}">
+      <div class="process-identity"><span class="process-signal" aria-hidden="true"></span><div><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><small>${escapeHtml(processKindCopy[item.kind] || item.kind)}</small></div></div>
+      <div class="process-entity"><span>ENTITY</span>${entity}</div>
+      <div class="process-runtime"><span>PID / TRY</span><b>${item.pid || '—'} / ${item.attempt}</b></div>
+      <div class="process-timing"><span>HEARTBEAT / OUTPUT</span><b>${relativeAge(item.heartbeat_at)} / ${relativeAge(item.last_output_at)}</b></div>
+      <div class="process-outcome"><span class="status-pill">${escapeHtml(processStatusCopy[item.status] || item.status)}</span><b>${escapeHtml(recovery || formatDuration(Number.isFinite(startedAt) ? finishedAt - startedAt : 0))}</b>${item.terminal_reason ? `<small title="${escapeHtml(item.terminal_reason)}">${escapeHtml(item.terminal_reason)}</small>` : `<small>${escapeHtml(relativeAge(latestSignal))}</small>`}</div>
     </article>`;
   }).join('');
 }
@@ -378,7 +457,7 @@ function render(nextState, health) {
   $('#mergeCount').textContent = state.stats.mergeReady;
   $('#conflictCount').textContent = state.approvals?.length || 0;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
-  renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+  renderMetrics(); renderProcessMonitor(); renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
 }
 
 async function openApprovalItem(item) {
@@ -633,6 +712,25 @@ $('#approvalBoard').addEventListener('click', async event => {
     tell(error.message, 'error');
   } finally {
     actionButton.disabled = false;
+  }
+});
+
+$('#processMonitor').addEventListener('click', async event => {
+  const taskButton = event.target.closest('[data-process-task]');
+  if (taskButton) {
+    const task = state.tasks.find(item => item.id === taskButton.dataset.processTask);
+    if (!task) return tell('关联任务已不在当前工作区。', 'error');
+    selectedTaskId = task.id;
+    layout.setRoute({ view: 'tasks', runId: task.run_id, taskId: task.id });
+    renderBoard();
+    renderDetail();
+    return;
+  }
+  const sessionButton = event.target.closest('[data-process-session]');
+  if (sessionButton) {
+    const session = state.groupSessions.find(item => item.id === sessionButton.dataset.processSession);
+    if (!session) return tell('关联群组会话已不在当前工作区。', 'error');
+    await openGroupSession(session.id, session.group_id);
   }
 });
 

@@ -61,6 +61,9 @@ for (const id of ['agentHealthBoard', 'checkAllAgents']) {
   assert.equal(html.includes(`id="${id}"`), true, `Agent diagnostics are missing #${id}.`);
 }
 assert.equal(html.includes('id="approvalBoard"'), true, 'Run center is missing the unified approval inbox.');
+for (const id of ['metricsBoard', 'processMonitor']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Process observability is missing #${id}.`);
+}
 assert.equal(html.includes('name="agent"'), true, 'Group seats need an adapter selector.');
 assert.equal(html.includes('data-remove-group-member'), true, 'Group seats need an explicit remove control.');
 assert.equal(script.includes('createGroupMemberRow'), true, 'Group editor must render dynamic member rows.');
@@ -68,6 +71,11 @@ assert.equal(script.includes('nextGroupMemberKey'), true, 'New group seats need 
 assert.equal(script.includes('data-agent-health'), true, 'Agent diagnostics need per-adapter check actions.');
 assert.equal(script.includes('renderAgentHealth'), true, 'Agent diagnostics need a state renderer.');
 assert.equal(script.includes('renderApprovals'), true, 'Approval inbox needs a state renderer.');
+assert.equal(script.includes('renderMetrics'), true, 'Operational metrics need a state renderer.');
+assert.equal(script.includes('renderProcessMonitor'), true, 'Process monitor needs a state renderer.');
+assert.equal(script.includes('recoveryStateCopy'), true, 'Process recovery states need explicit user-facing labels.');
+assert.equal(viewsCss.includes('.metrics-adapter-row'), true, 'Metrics need stable per-adapter rows.');
+assert.equal(viewsCss.includes('.process-row'), true, 'Process monitor needs stable process rows.');
 assert.equal(script.includes('data-approval-action'), true, 'Approval inbox needs explicit action controls.');
 assert.equal(script.includes('data-approval-open'), true, 'Complex approvals need detailed-view navigation.');
 

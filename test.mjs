@@ -659,6 +659,19 @@ try {
   assert.equal(processHistory.some(item => item.task_id === failed.id && item.status === 'failed' && item.exit_code === 7), true);
   assert.equal(processHistory.some(item => item.run_id === groupRun.id && item.session_id === groupSession.id), true);
   assert.equal(processHistory.every(item => item.status !== 'running'), true, 'Settled integration fixtures left a running process ledger row.');
+  const metrics = await api('/api/metrics');
+  assert.equal(metrics.summary.invocations, processHistory.length);
+  assert.equal(metrics.summary.timedOut >= 1, true);
+  assert.equal(metrics.summary.failed >= 1, true);
+  assert.equal(metrics.adapters.some(item => item.agent === 'codex' && item.invocations > 0), true);
+  assert.equal(metrics.concurrency.capacity, 2);
+  assert.equal(metrics.concurrency.peak >= 1, true);
+  assert.equal(metrics.concurrency.utilization >= 0, true);
+  assert.equal(Array.isArray(metrics.failures), true);
+  const groupRunMetrics = await api(`/api/metrics?runId=${groupRun.id}`);
+  assert.equal(groupRunMetrics.summary.invocations > 0, true);
+  assert.deepEqual(groupRunMetrics.runs.map(item => item.runId), [groupRun.id]);
+  assert.equal((await api('/api/state')).metrics.summary.invocations, metrics.summary.invocations);
   const consoleHtml = await readFile(join(process.cwd(), 'index.html'), 'utf8');
   for (const id of ['groupsBoard', 'openGroupDialog', 'groupDialog', 'groupConsole', 'groupMessages', 'groupConsensus']) {
     assert.equal(consoleHtml.includes(`id="${id}"`), true, `Console is missing #${id}.`);
