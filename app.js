@@ -137,6 +137,34 @@ function renderDetail() {
   $('#inspectorOverview').innerHTML = `<dl class="task-overview-grid"><div><dt>Agent</dt><dd>${escapeHtml(task.agent)}</dd></div><div><dt>状态</dt><dd>${statusLabel(task.status)}</dd></div><div><dt>Commit</dt><dd>${shortCommit(task.verified_commit)}</dd></div><div><dt>分支</dt><dd>${escapeHtml(task.branch || '—')}</dd></div><div class="wide"><dt>Worktree</dt><dd title="${escapeHtml(task.worktree || '')}">${escapeHtml(task.worktree || '尚未准备')}</dd></div><div class="wide"><dt>文件范围</dt><dd>${task.files.map(escapeHtml).join(', ')}</dd></div></dl><div class="inspector-actions">${taskActions(task) || '<span class="empty-inline">当前没有可执行操作</span>'}</div>`;
 }
 
+function renderApprovals() {
+  const approvals = state.approvals || [];
+  const kindCopy = {
+    task_prepare: '准备任务', task_start: '启动 Agent', task_verify: '运行验收', task_merge: '合并任务',
+    conflict_review: '冲突审查', conflict_patch: '确认补丁', task_recovery: '任务恢复', group_start: '启动讨论',
+    group_consensus: '确认 DAG', group_recovery: '群组恢复', run_publish: '发布 PR', pr_merge: '合并 PR'
+  };
+  const actionCopy = { prepare: '准备', start: '启动', verify: '验收', merge: '合并', review: '请求审查', start_group: '启动讨论', publish: '发布 PR', open: '查看详情' };
+  $('#approvalQueueLabel').textContent = `${approvals.length} PENDING`;
+  if (!approvals.length) {
+    $('#approvalBoard').innerHTML = '<p class="empty">当前没有等待确认的操作。</p>';
+    return;
+  }
+  $('#approvalBoard').innerHTML = approvals.map(item => {
+    const actions = item.actions.map(action => {
+      if (action === 'external') return `<a class="small secondary" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">打开 GitHub</a>`;
+      if (action === 'open') return `<button class="small secondary" type="button" data-approval-open="${escapeHtml(item.id)}">${actionCopy[action]}</button>`;
+      return `<button class="small ${item.risk === 'high' ? 'warn' : 'primary'}" type="button" data-approval-action="${escapeHtml(action)}" data-approval-id="${escapeHtml(item.id)}">${actionCopy[action] || escapeHtml(action)}</button>`;
+    }).join('');
+    return `<article class="approval-row risk-${escapeHtml(item.risk)}">
+      <div class="approval-kind"><span>${escapeHtml(kindCopy[item.kind] || item.kind)}</span><b>${escapeHtml(item.entityId)}</b></div>
+      <div class="approval-copy"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.description)}</p></div>
+      <div class="approval-meta"><span>${item.runId ? escapeHtml(item.runId) : 'LOCAL'}</span><time>${item.createdAt ? new Date(item.createdAt).toLocaleString() : '—'}</time></div>
+      <div class="approval-actions">${actions}</div>
+    </article>`;
+  }).join('');
+}
+
 function renderReview() {
   const review = activeReview();
   const stateEl = $('#reviewState');
@@ -348,9 +376,32 @@ function render(nextState, health) {
   $('#runCount').textContent = state.stats.runs;
   $('#agentCount').textContent = `${state.runtime.activeAgents} / ${state.maxConcurrency}`;
   $('#mergeCount').textContent = state.stats.mergeReady;
-  $('#conflictCount').textContent = state.stats.conflicts;
+  $('#conflictCount').textContent = state.approvals?.length || 0;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
-  renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+  renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents();
+}
+
+async function openApprovalItem(item) {
+  if (item.entityType === 'task') {
+    selectedTaskId = item.entityId;
+    layout.setRoute({ view: 'tasks', runId: item.runId, taskId: item.entityId });
+    renderBoard(); renderDetail();
+    return;
+  }
+  if (item.entityType === 'review') {
+    const review = state.reviews.find(candidate => candidate.id === item.entityId);
+    selectedTaskId = review?.task_id || null;
+    layout.setRoute({ view: 'tasks', runId: item.runId, taskId: selectedTaskId });
+    renderBoard(); renderDetail(); renderReview();
+    document.querySelector('[data-inspector-tab="review"]')?.click();
+    return;
+  }
+  if (item.entityType === 'group_session') {
+    const session = state.groupSessions.find(candidate => candidate.id === item.entityId);
+    await openGroupSession(item.entityId, session?.group_id || null);
+    return;
+  }
+  if (item.entityType === 'run') layout.setRoute({ view: 'delivery', runId: item.entityId });
 }
 
 async function refreshSelectedGroupSession(resetMessages = false) {
@@ -562,6 +613,26 @@ $('#checkAllAgents').addEventListener('click', async event => {
     tell(error.message, 'error');
   } finally {
     button.disabled = false;
+  }
+});
+
+$('#approvalBoard').addEventListener('click', async event => {
+  const actionButton = event.target.closest('[data-approval-action]');
+  const openButton = event.target.closest('[data-approval-open]');
+  if (!actionButton && !openButton) return;
+  const id = actionButton?.dataset.approvalId || openButton.dataset.approvalOpen;
+  const item = state.approvals.find(candidate => candidate.id === id);
+  if (!item) return tell('该审批已不再等待处理。', 'error');
+  if (openButton) return openApprovalItem(item);
+  actionButton.disabled = true;
+  try {
+    await request('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id, action: actionButton.dataset.approvalAction }) });
+    tell('审批动作已执行。');
+    await refresh();
+  } catch (error) {
+    tell(error.message, 'error');
+  } finally {
+    actionButton.disabled = false;
   }
 });
 

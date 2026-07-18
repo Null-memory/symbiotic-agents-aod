@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const fixture = await mkdtemp(join(tmpdir(), 'aod-integration-'));
 const port = 4928;
-const files = ['.gitignore', 'server.mjs', 'group-domain.mjs', 'group-schema.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const files = ['.gitignore', 'server.mjs', 'approval-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {
@@ -188,6 +188,25 @@ try {
   assert.equal((await api(`/api/tasks/${first.id}/logs`)).length > 0, true);
   assert.equal((await readSseInitialState()).includes('event: state'), true);
   await api(`/api/tasks/${first.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'failed' }) });
+
+  await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'manual', maxConcurrency: 2 }) });
+  const inboxTask = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Approval inbox task', agent: 'codex', files: ['approval-inbox.md'], acceptance: 'node --check server.mjs' }) });
+  const prepareApprovalId = `task:${inboxTask.id}:prepare`;
+  assert.equal((await api('/api/approvals')).some(item => item.id === prepareApprovalId), true);
+  assert.equal((await api('/api/state')).approvals.some(item => item.id === prepareApprovalId), true);
+  const preparedInboxTask = await api('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id: prepareApprovalId, action: 'prepare' }) });
+  assert.equal(preparedInboxTask.status, 'ready');
+  const startApprovalId = `task:${inboxTask.id}:start`;
+  assert.equal((await api('/api/approvals')).some(item => item.id === startApprovalId), true);
+  await api('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id: startApprovalId, action: 'start' }) });
+  assert.equal((await apiFailure('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id: startApprovalId, action: 'start' }) })).error.includes('no longer pending'), true);
+  await waitForTaskStatus(inboxTask.id, 'verifying');
+  const verifyApprovalId = `task:${inboxTask.id}:verify`;
+  await api('/api/approvals/action', { method: 'POST', body: JSON.stringify({ id: verifyApprovalId, action: 'verify' }) });
+  assert.equal((await waitForTaskStatus(inboxTask.id, 'merge_ready')).status, 'merge_ready');
+  assert.equal((await api('/api/approvals')).some(item => item.id === `task:${inboxTask.id}:merge`), true);
+  await api(`/api/tasks/${inboxTask.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'failed' }) });
+  await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'hybrid', maxConcurrency: 2 }) });
 
   const second = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Recovery task', agent: 'claude-code', files: ['styles.css'], acceptance: 'node --check server.mjs' }) });
   assert.equal(second.status, 'ready');

@@ -5,6 +5,7 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
+import { buildApprovalInbox } from './approval-domain.mjs';
 import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
 
@@ -1767,10 +1768,30 @@ async function cleanupTerminalWorktrees() {
   return cleaned;
 }
 
+function currentApprovals() {
+  return buildApprovalInbox({ tasks: listTasks(), runs: listRuns(), reviews: listReviews(), groupSessions: listGroupSessions() });
+}
+
+async function executeApprovalAction(payload) {
+  if (typeof payload.id !== 'string' || typeof payload.action !== 'string') throw new Error('Approval id and action are required.');
+  const item = currentApprovals().find(approvalItem => approvalItem.id === payload.id);
+  if (!item || !item.actions.includes(payload.action)) throw new Error('Approval is no longer pending or does not allow this action.');
+  const actionPayload = payload.payload && typeof payload.payload === 'object' ? payload.payload : {};
+  if (payload.action === 'prepare') return prepareTask(requireTask(item.entityId), 'approval');
+  if (payload.action === 'start') return startTask(requireTask(item.entityId), 'approval');
+  if (payload.action === 'verify') return verifyTask(requireTask(item.entityId), 'approval');
+  if (payload.action === 'merge') return mergeTask(requireTask(item.entityId), 'approval');
+  if (payload.action === 'review') return startReview(requireTask(item.entityId));
+  if (payload.action === 'start_group') return startGroupDiscussion(requireGroupSession(item.entityId));
+  if (payload.action === 'publish') return publishRun(requireRun(item.entityId), actionPayload);
+  throw new Error('This approval must be completed in its detailed view.');
+}
+
 function publicState() {
   const tasks = listTasks();
   const runs = listRuns();
   const groups = listGroups();
+  const reviews = listReviews();
   const groupSessions = listGroupSessions().map(session => ({
     id: session.id, group_id: session.group_id, requirement: session.requirement, status: session.status,
     current_round: session.current_round, max_rounds: session.max_rounds, max_repairs: session.max_repairs,
@@ -1779,7 +1800,7 @@ function publicState() {
   }));
   return {
     workspace: basename(root), mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
-    agents, agentHealth: listAgentHealth(), statuses, transitions, tasks, runs, groups, groupSessions, reviews: listReviews(),
+    agents, agentHealth: listAgentHealth(), approvals: buildApprovalInbox({ tasks, runs, reviews, groupSessions }), statuses, transitions, tasks, runs, groups, groupSessions, reviews,
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
     runtime: { activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size, activeRoleProcesses: roleProcesses.size, activePlanners: plannerProcesses.size, recoveryRequired: tasks.filter(task => task.status === 'recovery_required').length + groupSessions.filter(session => session.status === 'recovery_required').length },
     stats: { total: tasks.length, runs: runs.length, groups: groups.length, groupSessions: groupSessions.length, worktrees: tasks.filter(task => task.worktree).length, mergeReady: tasks.filter(task => task.status === 'merge_ready').length, conflicts: tasks.filter(task => task.status === 'conflict_review').length }
@@ -1803,6 +1824,8 @@ async function api(request, response, url) {
   }
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
   if (request.method === 'GET' && url.pathname === '/api/github/status') return send(response, 200, await githubStatus());
+  if (request.method === 'GET' && url.pathname === '/api/approvals') return send(response, 200, currentApprovals());
+  if (request.method === 'POST' && url.pathname === '/api/approvals/action') return send(response, 200, await executeApprovalAction(await body(request)));
   if (request.method === 'GET' && url.pathname === '/api/agents/health') return send(response, 200, listAgentHealth());
   const agentHealthMatch = url.pathname.match(/^\/api\/agents\/([a-z0-9-]+)\/check$/i);
   if (agentHealthMatch && request.method === 'POST') return send(response, 200, await checkAgentHealth(agentHealthMatch[1]));

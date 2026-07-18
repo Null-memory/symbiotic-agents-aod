@@ -48,7 +48,12 @@
               <article><span>运行单元</span><strong id="runCount">0</strong></article>
               <article><span>活跃 Agent</span><strong id="agentCount">0 / 0</strong></article>
               <article><span>待合并</span><strong id="mergeCount">0</strong></article>
-              <article><span>需处理</span><strong id="conflictCount">0</strong></article>
+              <article><span>待审批</span><strong id="conflictCount">0</strong></article>
+            </section>
+
+            <section class="work-section approval-section" aria-labelledby="approvalTitle">
+              <div class="section-head"><div><p class="kicker">OPERATOR INBOX</p><h2 id="approvalTitle">统一审批中心</h2></div><span class="status-pill" id="approvalQueueLabel">0 PENDING</span></div>
+              <div class="approval-board" id="approvalBoard"><p class="empty">当前没有等待确认的操作。</p></div>
             </section>
 
             <section class="work-section agent-health-section" aria-labelledby="agentHealthTitle">
