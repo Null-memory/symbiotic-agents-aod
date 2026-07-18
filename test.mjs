@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const fixture = await mkdtemp(join(tmpdir(), 'aod-integration-'));
 const port = 4928;
-const files = ['.gitignore', 'server.mjs', 'group-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const files = ['.gitignore', 'server.mjs', 'group-domain.mjs', 'group-schema.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {
@@ -127,7 +127,7 @@ try {
   await run('git', ['add', '.']);
   await run('git', ['-c', 'user.name=AOD Test', '-c', 'user.email=aod@test.local', 'commit', '-m', 'fixture']);
   const fakeCodex = "const fs=require('fs');const cp=require('child_process');if(process.env.AOD_GROUP_SESSION_ID&&!process.env.AOD_TASK_STAGE){if(process.env.AOD_GROUP_PHASE==='synthesis'){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,200);const roster=JSON.parse(process.env.AOD_GROUP_ROSTER);const role=r=>roster.find(m=>m.role===r).id;console.log(JSON.stringify({title:'Group delivery',summary:'Agents reached agreement.',decisions:['Use the existing run pipeline.'],disagreements:[],risks:['Keep merges manual.'],maxRepairs:2,tasks:[{key:'group-doc',title:'Create group delivery note',description:'Create the agreed artifact.',files:['group-output.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'low',executorMemberId:role('executor'),reviewerMemberId:role('reviewer'),fixerMemberId:role('fixer')}]}));}else{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,150);console.log(process.env.AOD_GROUP_PHASE+' response from '+process.env.AOD_GROUP_MEMBER_ID);}process.exit(0);}if(process.env.AOD_TASK_STAGE==='execute'){const target=JSON.parse(process.env.AOD_TASK_FILES||'[\"group-output.md\"]')[0];if(target==='group-cancel.md')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1500);fs.writeFileSync(target,target.includes('repair')?'needs repair\\n':'group execution output\\n');cp.execFileSync('git',['add',target]);cp.execFileSync('git',['-c','user.name=AOD Agent','-c','user.email=aod@test.local','commit','-m','docs: add group output']);console.log('group executor complete');process.exit(0);}if(process.env.AOD_TASK_ID!=='T-001'){const target=JSON.parse(process.env.AOD_TASK_FILES||'[\"delivery-note.md\"]')[0];fs.writeFileSync(target,'run branch output\\n');cp.execFileSync('git',['add',target]);cp.execFileSync('git',['-c','user.name=AOD Agent','-c','user.email=aod@test.local','commit','-m','docs: add delivery note']);}console.log('fake agent complete')";
-  const fakeClaude = "const fs=require('fs');if(process.env.AOD_TASK_STAGE==='review'){if(process.argv[1]!==process.env.AOD_WORKTREE){console.error('review worktree argument mismatch');process.exit(8);}const target=JSON.parse(process.env.AOD_TASK_FILES||'[]')[0];if(target==='group-cancel-review.md')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1500);if(target==='group-review-mutation.md')fs.appendFileSync(target,'reviewer mutation\\n');const needs=target&&fs.existsSync(target)&&fs.readFileSync(target,'utf8').includes('needs repair');console.log(JSON.stringify(needs?{decision:'changes_requested',findings:['Replace defect marker.'],summary:'Repair required.'}:{decision:'pass',findings:[],summary:'Review passed.'}));process.exit(0);}else if(process.env.AOD_GROUP_SESSION_ID){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,150);console.log(process.env.AOD_GROUP_PHASE+' response from '+process.env.AOD_GROUP_MEMBER_ID);}else{setTimeout(()=>{},1000)}";
+  const fakeClaude = "const fs=require('fs');if(process.env.AOD_TASK_STAGE==='review'){if(process.argv[1]!==process.env.AOD_WORKTREE){console.error('review worktree argument mismatch');process.exit(8);}const target=JSON.parse(process.env.AOD_TASK_FILES||'[]')[0];if(target==='group-cancel-review.md')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1500);if(target==='group-review-mutation.md')fs.appendFileSync(target,'reviewer mutation\\n');const needs=target&&fs.existsSync(target)&&fs.readFileSync(target,'utf8').includes('needs repair');console.log(JSON.stringify(needs?{decision:'changes_requested',findings:['Replace defect marker.'],summary:'Repair required.'}:{decision:'pass',findings:[],summary:'Review passed.'}));process.exit(0);}else if(process.env.AOD_GROUP_SESSION_ID){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,150);if(process.env.AOD_GROUP_PHASE==='synthesis'){const roster=JSON.parse(process.env.AOD_GROUP_ROSTER);const role=r=>roster.find(m=>m.role===r).id;console.log(JSON.stringify({title:'Multi-seat Claude group',summary:'Three Claude seats reached agreement.',decisions:['Keep seat identities independent.'],disagreements:[],risks:['Shared adapter capacity.'],maxRepairs:2,tasks:[{key:'multi-seat-doc',title:'Create multi-seat note',description:'Record the agreement.',files:['multi-seat-output.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'low',executorMemberId:role('executor'),reviewerMemberId:role('reviewer'),fixerMemberId:role('fixer')}]}));}else{console.log(process.env.AOD_GROUP_PHASE+' response from '+process.env.AOD_GROUP_MEMBER_ID);}process.exit(0);}else{setTimeout(()=>{},1000)}";
   const fakeAntigravity = "const fs=require('fs');const cp=require('child_process');if(process.env.AOD_TASK_STAGE==='repair'){const target=JSON.parse(process.env.AOD_TASK_FILES||'[]')[0];if(target==='group-repair-exhaust.md')fs.appendFileSync(target,'needs repair again\\n');else fs.writeFileSync(target,'repaired output\\n');cp.execFileSync('git',['add',target]);cp.execFileSync('git',['-c','user.name=AOD Agent','-c','user.email=aod@test.local','commit','-m','fix: repair group output']);console.log('repair complete');process.exit(0);}if(process.env.AOD_GROUP_SESSION_ID){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,150);console.log(process.env.AOD_GROUP_PHASE+' response from '+process.env.AOD_GROUP_MEMBER_ID);process.exit(0);}process.exit(7)";
   const fakeConflictReviewer = "const fs=require('fs');const target=JSON.parse(process.env.AOD_TASK_FILES||'[]')[0];if(target!=='conflict-approval.md')fs.writeFileSync('reviewer-leak.txt','must remain isolated\\n');console.log('Suggested patch only.');";
   await writeFile(join(fixture, '.aod.config.json'), JSON.stringify({
@@ -272,6 +272,29 @@ try {
     ]
   }) });
   assert.equal(invalidGroup.error.includes('reviewer'), true);
+
+  const multiSeatGroup = await api('/api/groups', { method: 'POST', body: JSON.stringify({
+    name: 'Three Claude perspectives',
+    description: 'Use one adapter as three independent group participants.',
+    moderatorKey: 'claude-builder',
+    members: [
+      { key: 'claude-builder', agent: 'claude-code', role: 'executor', displayName: 'Claude Builder', instructions: 'Design and implement.' },
+      { key: 'claude-critic', agent: 'claude-code', role: 'reviewer', displayName: 'Claude Critic', instructions: 'Challenge and review.' },
+      { key: 'claude-repair', agent: 'claude-code', role: 'fixer', displayName: 'Claude Repair', instructions: 'Repair rejected work.' }
+    ]
+  }) });
+  assert.equal(multiSeatGroup.members.length, 3);
+  assert.equal(multiSeatGroup.members.every(member => member.agent === 'claude-code'), true);
+  assert.equal(new Set(multiSeatGroup.members.map(member => member.key)).size, 3);
+
+  const multiSeatSession = await api(`/api/groups/${multiSeatGroup.id}/sessions`, { method: 'POST', body: JSON.stringify({ requirement: 'Reach agreement as three independent Claude seats.' }) });
+  assert.equal(multiSeatSession.members.length, 3);
+  assert.equal(new Set(multiSeatSession.members.map(member => member.id)).size, 3);
+  await api(`/api/group-sessions/${multiSeatSession.id}/start`, { method: 'POST', body: '{}' });
+  const completedMultiSeatSession = await waitForGroupSessionStatus(multiSeatSession.id, 'awaiting_confirmation');
+  assert.equal(completedMultiSeatSession.consensus.title, 'Multi-seat Claude group');
+  assert.equal(new Set(completedMultiSeatSession.turns.filter(turn => turn.phase !== 'synthesis').map(turn => turn.member_id)).size, 3);
+  assert.equal((await api(`/api/group-sessions/${multiSeatSession.id}/messages?after=0`)).filter(message => message.sender_kind === 'member').length, 10);
 
   const groupSession = await api(`/api/groups/${group.id}/sessions`, { method: 'POST', body: JSON.stringify({ requirement: 'Discuss and create a group delivery note.' }) });
   assert.equal(groupSession.status, 'draft');

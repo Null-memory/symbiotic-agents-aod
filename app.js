@@ -389,16 +389,58 @@ const groupMemberDefaults = {
   antigravity: { role: 'fixer', displayName: '反重力 修复', instructions: '根据审查意见执行最小范围修复。' }
 };
 
+const initialGroupMembers = Object.entries(groupMemberDefaults).map(([agent, defaults]) => ({ key: agent, agent, ...defaults }));
+
+function groupMemberRows() {
+  return [...$('#groupMemberEditor').querySelectorAll('[data-member-key]')];
+}
+
+function nextGroupMemberKey(agent, excludedRow = null) {
+  const used = new Set(groupMemberRows().filter(row => row !== excludedRow).map(row => row.dataset.memberKey));
+  let key = agent;
+  let suffix = 2;
+  while (used.has(key)) key = `${agent}-${suffix++}`;
+  return key;
+}
+
+function createGroupMemberRow(member = {}, { moderator = false, autoKey = false } = {}) {
+  const row = $('#groupMemberTemplate').content.firstElementChild.cloneNode(true);
+  const agent = groupMemberDefaults[member.agent] ? member.agent : 'claude-code';
+  const defaults = groupMemberDefaults[agent];
+  const key = member.key || nextGroupMemberKey(agent);
+  row.dataset.memberKey = key;
+  row.dataset.keyAuto = String(autoKey || !member.key);
+  row.dataset.lastAgent = agent;
+  row.querySelector('[name="agent"]').value = agent;
+  row.querySelector('[name="role"]').value = member.role || defaults.role;
+  row.querySelector('[name="displayName"]').value = member.displayName ?? member.display_name ?? defaults.displayName;
+  row.querySelector('[name="instructions"]').value = member.instructions ?? defaults.instructions;
+  row.querySelector('.member-seat-key').textContent = key;
+  const radio = row.querySelector('[name="moderatorKey"]');
+  radio.value = key;
+  radio.checked = moderator || member.isModerator || member.is_moderator || false;
+  return row;
+}
+
+function renderGroupMemberRows(members, moderatorKey = null) {
+  const rows = members.map(member => createGroupMemberRow(member, {
+    moderator: member.key === moderatorKey || member.isModerator || member.is_moderator,
+    autoKey: false
+  }));
+  $('#groupMemberEditor').replaceChildren(...rows);
+  syncGroupMemberRows();
+}
+
 function syncGroupMemberRows() {
-  const rows = [...$('#groupMemberEditor').querySelectorAll('[data-agent]')];
+  const rows = groupMemberRows();
+  const moderator = rows.find(row => row.querySelector('[name="moderatorKey"]').checked);
+  if (!moderator && rows.length) rows[0].querySelector('[name="moderatorKey"]').checked = true;
   for (const row of rows) {
-    const enabled = row.querySelector('[name="enabled"]').checked;
-    row.classList.toggle('disabled', !enabled);
-    row.querySelector('[name="moderatorKey"]').disabled = !enabled;
+    const key = row.dataset.memberKey;
+    row.querySelector('[name="moderatorKey"]').value = key;
+    row.querySelector('.member-seat-key').textContent = key;
+    row.querySelector('[data-remove-group-member]').disabled = rows.length <= 2;
   }
-  const enabledRows = rows.filter(row => row.querySelector('[name="enabled"]').checked);
-  const moderator = rows.find(row => row.querySelector('[name="moderatorKey"]').checked && !row.querySelector('[name="moderatorKey"]').disabled);
-  if (!moderator && enabledRows.length) enabledRows[0].querySelector('[name="moderatorKey"]').checked = true;
 }
 
 function resetGroupForm() {
@@ -407,19 +449,7 @@ function resetGroupForm() {
   editingGroupId = null;
   $('#groupDialogTitle').textContent = '创建 Agent 群组';
   $('#groupFormSubmit').textContent = '创建群组';
-  for (const row of form.querySelectorAll('[data-agent]')) {
-    const agent = row.dataset.agent;
-    const defaults = groupMemberDefaults[agent];
-    row.dataset.memberKey = agent;
-    row.querySelector('[name="enabled"]').checked = true;
-    row.querySelector('[name="role"]').value = defaults.role;
-    row.querySelector('[name="displayName"]').value = defaults.displayName;
-    row.querySelector('[name="instructions"]').value = defaults.instructions;
-    const radio = row.querySelector('[name="moderatorKey"]');
-    radio.value = agent;
-    radio.checked = agent === 'codex';
-  }
-  syncGroupMemberRows();
+  renderGroupMemberRows(initialGroupMembers, 'codex');
 }
 
 function openGroupEditor(groupId = null) {
@@ -434,30 +464,18 @@ function openGroupEditor(groupId = null) {
     form.querySelector('[name="description"]').value = group.description || '';
     form.querySelector('[name="maxRounds"]').value = String(group.max_rounds);
     form.querySelector('[name="maxRepairs"]').value = String(group.max_repairs);
-    for (const row of form.querySelectorAll('[data-agent]')) {
-      const member = group.members.find(item => item.agent === row.dataset.agent);
-      row.querySelector('[name="enabled"]').checked = Boolean(member);
-      if (!member) continue;
-      row.dataset.memberKey = member.key;
-      row.querySelector('[name="role"]').value = member.role;
-      row.querySelector('[name="displayName"]').value = member.display_name;
-      row.querySelector('[name="instructions"]').value = member.instructions || '';
-      const radio = row.querySelector('[name="moderatorKey"]');
-      radio.value = member.key;
-      radio.checked = member.is_moderator;
-    }
-    syncGroupMemberRows();
+    renderGroupMemberRows(group.members, group.members.find(member => member.is_moderator)?.key);
   }
   groupDialog.showModal();
 }
 
 function readGroupForm() {
   const form = $('#groupForm');
-  const enabledRows = [...form.querySelectorAll('[data-agent]')].filter(row => row.querySelector('[name="enabled"]').checked);
-  if (enabledRows.length < 2) throw new Error('至少启用 2 个 Agent 成员。');
-  const members = enabledRows.map(row => ({
+  const rows = groupMemberRows();
+  if (rows.length < 2) throw new Error('至少需要 2 个 Agent 席位。');
+  const members = rows.map(row => ({
     key: row.dataset.memberKey,
-    agent: row.dataset.agent,
+    agent: row.querySelector('[name="agent"]').value,
     role: row.querySelector('[name="role"]').value,
     displayName: row.querySelector('[name="displayName"]').value.trim(),
     instructions: row.querySelector('[name="instructions"]').value.trim()
@@ -466,7 +484,7 @@ function readGroupForm() {
   if (!members.some(member => member.role === 'executor')) throw new Error('群组至少需要一名 executor。');
   if (!members.some(member => member.role === 'reviewer')) throw new Error('群组至少需要一名 reviewer。');
   if (maxRepairs > 0 && !members.some(member => member.role === 'fixer')) throw new Error('修复次数大于 0 时至少需要一名 fixer。');
-  const moderator = enabledRows.find(row => row.querySelector('[name="moderatorKey"]').checked);
+  const moderator = rows.find(row => row.querySelector('[name="moderatorKey"]').checked);
   if (!moderator) throw new Error('请选择一名主持者。');
   return {
     name: form.querySelector('[name="name"]').value.trim(),
@@ -500,7 +518,34 @@ $('#saveSettings').addEventListener('click', async () => {
 });
 
 $('#groupMemberEditor').addEventListener('change', event => {
-  if (event.target.matches('[name="enabled"], [name="moderatorKey"]')) syncGroupMemberRows();
+  const row = event.target.closest('[data-member-key]');
+  if (row && event.target.matches('[name="agent"]')) {
+    const previousAgent = row.dataset.lastAgent;
+    const nextAgent = event.target.value;
+    const previousDefaults = groupMemberDefaults[previousAgent];
+    const nextDefaults = groupMemberDefaults[nextAgent];
+    if (row.dataset.keyAuto === 'true') row.dataset.memberKey = nextGroupMemberKey(nextAgent, row);
+    const displayName = row.querySelector('[name="displayName"]');
+    const instructions = row.querySelector('[name="instructions"]');
+    if (!displayName.value || displayName.value === previousDefaults?.displayName) displayName.value = nextDefaults.displayName;
+    if (!instructions.value || instructions.value === previousDefaults?.instructions) instructions.value = nextDefaults.instructions;
+    row.dataset.lastAgent = nextAgent;
+  }
+  syncGroupMemberRows();
+});
+
+$('#groupMemberEditor').addEventListener('click', event => {
+  const remove = event.target.closest('[data-remove-group-member]');
+  if (!remove) return;
+  remove.closest('[data-member-key]').remove();
+  syncGroupMemberRows();
+});
+
+$('#addGroupMember').addEventListener('click', () => {
+  const row = createGroupMemberRow({ agent: 'claude-code' }, { autoKey: true });
+  $('#groupMemberEditor').append(row);
+  syncGroupMemberRows();
+  row.querySelector('[name="agent"]').focus();
 });
 
 $('#groupForm').addEventListener('submit', async event => {

@@ -99,13 +99,29 @@ test('exports the supported group roles and normalizes a valid group', () => {
   });
 });
 
-test('rejects duplicate agents in a group', () => {
+test('allows multiple seats backed by the same agent adapter', () => {
+  const members = [
+    { key: 'claude-builder', agent: 'claude-code', role: 'executor', displayName: 'Claude Builder' },
+    { key: 'claude-critic', agent: 'claude-code', role: 'reviewer', displayName: 'Claude Critic' },
+    { key: 'claude-repair', agent: 'claude-code', role: 'fixer', displayName: 'Claude Repair' },
+  ];
+
+  const result = validateGroupDraft(validGroupDraft({ members, moderatorKey: 'claude-builder' }), supportedAgents);
+
+  assert.deepEqual(result.members.map(member => [member.key, member.agent, member.role]), [
+    ['claude-builder', 'claude-code', 'executor'],
+    ['claude-critic', 'claude-code', 'reviewer'],
+    ['claude-repair', 'claude-code', 'fixer'],
+  ]);
+});
+
+test('rejects duplicate member keys even when adapters differ', () => {
   const members = validGroupDraft().members.map(member => ({ ...member }));
-  members[1].agent = 'codex';
+  members[1].key = members[0].key;
 
   assert.throws(
     () => validateGroupDraft(validGroupDraft({ members }), supportedAgents),
-    /duplicate agent/i,
+    /duplicate member key/i,
   );
 });
 

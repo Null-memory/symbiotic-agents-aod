@@ -42,7 +42,6 @@ export function validateGroupDraft(payload, supportedAgents) {
 
   const supported = supportedAgents instanceof Set ? supportedAgents : new Set(Array.isArray(supportedAgents) ? supportedAgents : []);
   const keys = new Set();
-  const agents = new Set();
   const members = payload.members.map((member, index) => {
     if (!member || typeof member !== 'object' || Array.isArray(member)) throw new Error(`Member ${index + 1} must be an object.`);
     const key = validKey(member.key, `Member ${index + 1} key`);
@@ -50,10 +49,8 @@ export function validateGroupDraft(payload, supportedAgents) {
     const role = requiredString(member.role, `Member ${key} role`);
     if (keys.has(key)) throw new Error(`Duplicate member key: ${key}`);
     if (!supported.has(agent)) throw new Error(`Member ${key} has an unsupported agent: ${agent}`);
-    if (agents.has(agent)) throw new Error(`Duplicate agent in group: ${agent}`);
     if (!GROUP_ROLES.includes(role)) throw new Error(`Member ${key} has an invalid role: ${role}`);
     keys.add(key);
-    agents.add(agent);
     return {
       key,
       agent,

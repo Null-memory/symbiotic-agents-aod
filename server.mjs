@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
+import { migrateAgentGroupMembers } from './group-schema.mjs';
 
 const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
@@ -160,8 +161,7 @@ db.exec(`
     instructions TEXT NOT NULL DEFAULT '',
     position INTEGER NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(group_id, key),
-    UNIQUE(group_id, agent)
+    UNIQUE(group_id, key)
   );
   CREATE TABLE IF NOT EXISTS group_sessions (
     id TEXT PRIMARY KEY,
@@ -223,6 +223,7 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 `);
+migrateAgentGroupMembers(db);
 
 function ensureColumn(table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(item => item.name);
