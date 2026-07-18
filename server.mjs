@@ -8,6 +8,7 @@ import { basename, dirname, extname, join, normalize, resolve } from 'node:path'
 import { buildApprovalInbox } from './approval-domain.mjs';
 import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
+import { classifyInterruptedProcess } from './process-domain.mjs';
 
 const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
@@ -40,12 +41,16 @@ const reviewProcesses = new Map();
 const groupProcesses = new Map();
 const roleProcesses = new Map();
 const plannerProcesses = new Map();
+const processHeartbeats = new Map();
 const eventStreams = new Set();
 const streamReplay = [];
 let streamEventId = 0;
 let pendingAgentStarts = 0;
 let githubLogin = null;
 let advanceQueue = Promise.resolve();
+const daemonLeaseOwner = crypto.randomUUID();
+const processHeartbeatMs = Math.max(250, Number(process.env.AOD_PROCESS_HEARTBEAT_MS || 5000));
+const processLeaseMs = Math.max(processHeartbeatMs * 2, Number(process.env.AOD_PROCESS_LEASE_MS || 15000));
 
 mkdirSync(aodDir, { recursive: true });
 const db = new DatabaseSync(databasePath);
@@ -141,6 +146,37 @@ db.exec(`
     stream TEXT NOT NULL,
     message TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS agent_processes (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    run_id TEXT,
+    task_id TEXT,
+    session_id TEXT,
+    agent TEXT NOT NULL,
+    status TEXT NOT NULL,
+    pid INTEGER,
+    lease_owner TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    last_output_at TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    timeout_ms INTEGER NOT NULL,
+    exit_code INTEGER,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    command_hash TEXT,
+    recovery_state TEXT,
+    terminal_reason TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cost_usd REAL,
+    metadata_json TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_processes_status ON agent_processes(status, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_agent_processes_run ON agent_processes(run_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_agent_processes_task ON agent_processes(task_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_agent_processes_agent ON agent_processes(agent, started_at DESC);
   CREATE TABLE IF NOT EXISTS agent_health_checks (
     agent TEXT PRIMARY KEY,
     configured INTEGER NOT NULL,
@@ -475,6 +511,78 @@ function redactSecrets(value) {
   return String(value).replace(/(ghp_|github_pat_|sk-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{16}|Bearer\s+)[A-Za-z0-9_\-./=]+/g, '$1[REDACTED]');
 }
 
+function processFromRow(row) {
+  if (!row) return null;
+  const { metadata_json: metadataJson, ...fields } = row;
+  return {
+    ...fields,
+    terminal_reason: row.terminal_reason ? redactSecrets(row.terminal_reason) : null,
+    metadata: json(redactSecrets(metadataJson || '{}'), {})
+  };
+}
+
+function listAgentProcesses({ limit = 100, runId = null } = {}) {
+  const boundedLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+  const rows = runId
+    ? db.prepare('SELECT * FROM agent_processes WHERE run_id = ? ORDER BY started_at DESC LIMIT ?').all(runId, boundedLimit)
+    : db.prepare('SELECT * FROM agent_processes ORDER BY started_at DESC LIMIT ?').all(boundedLimit);
+  return rows.map(processFromRow);
+}
+
+function leaseExpiry(at = Date.now()) { return new Date(at + processLeaseMs).toISOString(); }
+
+function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, sessionId = null, agent, child, command, args = [], timeoutMs, attempt = 1, metadata = {} }) {
+  const id = `AP-${crypto.randomUUID()}`;
+  const startedAt = now();
+  const commandHash = createHash('sha256').update(JSON.stringify([command, args])).digest('hex');
+  db.prepare(`INSERT INTO agent_processes(
+    id, kind, entity_id, run_id, task_id, session_id, agent, status, pid, lease_owner, lease_expires_at,
+    heartbeat_at, started_at, timeout_ms, attempt, command_hash, metadata_json
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, kind, entityId, runId, taskId, sessionId, agent, child.pid || null, daemonLeaseOwner, leaseExpiry(),
+    startedAt, startedAt, timeoutMs, Math.max(1, Number(attempt) || 1), commandHash, JSON.stringify(metadata || {})
+  );
+  const heartbeat = setInterval(() => {
+    const heartbeatAt = now();
+    try {
+      db.prepare("UPDATE agent_processes SET heartbeat_at = ?, lease_expires_at = ? WHERE id = ? AND status = 'running'")
+        .run(heartbeatAt, leaseExpiry(), id);
+      broadcast('process', { id, status: 'running', heartbeatAt });
+    } catch {}
+  }, processHeartbeatMs);
+  heartbeat.unref?.();
+  processHeartbeats.set(id, heartbeat);
+  broadcast('process', { id, kind, entityId, taskId, sessionId, runId, agent, status: 'running', pid: child.pid || null, at: startedAt });
+  return id;
+}
+
+function touchAgentProcessOutput(id) {
+  if (!id) return;
+  const outputAt = now();
+  db.prepare("UPDATE agent_processes SET heartbeat_at = ?, last_output_at = ?, lease_expires_at = ? WHERE id = ? AND status = 'running'")
+    .run(outputAt, outputAt, leaseExpiry(), id);
+  broadcast('process', { id, status: 'running', lastOutputAt: outputAt });
+}
+
+function finishAgentProcessRecord(id, { status, exitCode = null, reason = null, inputTokens = null, outputTokens = null, costUsd = null } = {}) {
+  if (!id) return null;
+  const heartbeat = processHeartbeats.get(id);
+  if (heartbeat) clearInterval(heartbeat);
+  processHeartbeats.delete(id);
+  const finishedAt = now();
+  db.prepare(`UPDATE agent_processes SET status = ?, heartbeat_at = ?, lease_expires_at = ?,
+    finished_at = ?, exit_code = ?, terminal_reason = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?
+    WHERE id = ? AND status = 'running'`).run(
+    status, finishedAt, finishedAt, finishedAt, exitCode, reason ? redactSecrets(reason) : null,
+    inputTokens !== null && inputTokens !== undefined && Number.isFinite(Number(inputTokens)) ? Number(inputTokens) : null,
+    outputTokens !== null && outputTokens !== undefined && Number.isFinite(Number(outputTokens)) ? Number(outputTokens) : null,
+    costUsd !== null && costUsd !== undefined && Number.isFinite(Number(costUsd)) ? Number(costUsd) : null,
+    id
+  );
+  broadcast('process', { id, status, exitCode, at: finishedAt });
+  return processFromRow(db.prepare('SELECT * FROM agent_processes WHERE id = ?').get(id));
+}
+
 function appendOutput(taskId, chunk, stream = 'stdout') {
   const task = requireTask(taskId);
   const message = redactSecrets(chunk);
@@ -501,27 +609,67 @@ function importLegacyState() {
   for (const event of legacy.events || []) appendEvent(event.type || 'legacy', event.message || 'Imported legacy event', event.taskId || null);
 }
 
+function observePid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return { alive: false };
+  try {
+    process.kill(pid, 0);
+    return { alive: true };
+  } catch (error) {
+    if (error?.code === 'ESRCH') return { alive: false };
+    return { alive: null };
+  }
+}
+
+function processRecoveryNote(processRecord) {
+  if (!processRecord) return 'Daemon restarted while work was in progress.';
+  if (processRecord.recovery_state === 'live') return `Daemon restarted; PID ${processRecord.pid} still appears live with a valid lease. Confirm its outcome before retrying.`;
+  if (processRecord.recovery_state === 'stale') return `Daemon restarted; the ${processRecord.kind} process lease is stale and its PID is no longer running.`;
+  return `Daemon restarted; PID ${processRecord.pid || 'unknown'} cannot be verified because its lease expired or process access was unavailable.`;
+}
+
+function recoverInterruptedAgentProcesses() {
+  const interrupted = db.prepare("SELECT * FROM agent_processes WHERE status = 'running' ORDER BY started_at ASC").all();
+  for (const row of interrupted) {
+    const recoveryState = classifyInterruptedProcess(row, observePid(row.pid), now());
+    const recoveredAt = now();
+    const note = processRecoveryNote({ ...row, recovery_state: recoveryState });
+    db.prepare(`UPDATE agent_processes SET status = 'recovery_required', recovery_state = ?, finished_at = ?, terminal_reason = ? WHERE id = ? AND status = 'running'`)
+      .run(recoveryState, recoveredAt, note, row.id);
+    appendEvent('process_recovery', `${row.id} classified as ${recoveryState} after daemon restart`, row.task_id || null, row.run_id || null);
+  }
+}
+
+function latestRecoveredProcess({ taskId = null, sessionId = null, entityId = null } = {}) {
+  if (taskId) return processFromRow(db.prepare("SELECT * FROM agent_processes WHERE task_id = ? AND status = 'recovery_required' ORDER BY started_at DESC LIMIT 1").get(taskId));
+  if (sessionId) return processFromRow(db.prepare("SELECT * FROM agent_processes WHERE session_id = ? AND status = 'recovery_required' ORDER BY started_at DESC LIMIT 1").get(sessionId));
+  if (entityId) return processFromRow(db.prepare("SELECT * FROM agent_processes WHERE entity_id = ? AND status = 'recovery_required' ORDER BY started_at DESC LIMIT 1").get(entityId));
+  return null;
+}
+
 function recoverInterruptedTasks() {
   const interrupted = db.prepare("SELECT id FROM tasks WHERE status IN ('preparing', 'running', 'verifying', 'reviewing', 'repairing', 'merging')").all();
   for (const row of interrupted) {
     const task = requireTask(row.id);
-    updateTask(task.id, { status: 'recovery_required', process_pid: null, recovery_note: 'Daemon restarted while work was in progress.' });
+    const recoveryNote = processRecoveryNote(latestRecoveredProcess({ taskId: task.id }));
+    updateTask(task.id, { status: 'recovery_required', process_pid: null, recovery_note: recoveryNote });
     const assignment = getTaskRoleAssignment(task.id);
     if (assignment) {
       updateTaskRoleAssignment(task.id, { stage: 'recovery_required' });
-      updateGroupSession(assignment.session_id, { status: 'recovery_required', recovery_note: 'Daemon restarted during the role pipeline.' });
+      updateGroupSession(assignment.session_id, { status: 'recovery_required', recovery_note: recoveryNote });
     }
     appendEvent('recovery', `${task.id} requires operator confirmation after daemon restart`, task.id);
   }
   const interruptedReviews = db.prepare("SELECT id, task_id FROM reviews WHERE status = 'running'").all();
   for (const review of interruptedReviews) {
     db.prepare('UPDATE reviews SET status = ?, updated_at = ? WHERE id = ?').run('pending', now(), review.id);
-    appendEvent('recovery', `${review.id} reviewer process was interrupted and can be retried`, review.task_id);
+    const recoveredProcess = latestRecoveredProcess({ entityId: review.id });
+    appendEvent('recovery', `${review.id} reviewer process was ${recoveredProcess?.recovery_state || 'interrupted'} and requires confirmation`, review.task_id);
   }
   const interruptedSessions = db.prepare("SELECT id FROM group_sessions WHERE status IN ('discussing', 'synthesizing')").all();
   for (const session of interruptedSessions) {
+    const recoveryNote = processRecoveryNote(latestRecoveredProcess({ sessionId: session.id }));
     db.prepare("UPDATE group_sessions SET status = 'recovery_required', recovery_note = ?, updated_at = ? WHERE id = ?")
-      .run('Daemon restarted while an agent turn was active.', now(), session.id);
+      .run(recoveryNote, now(), session.id);
     db.prepare("UPDATE group_turns SET status = 'recovery_required', process_pid = NULL, finished_at = ? WHERE session_id = ? AND status = 'running'")
       .run(now(), session.id);
     appendEvent('recovery', `${session.id} requires operator confirmation after daemon restart`);
@@ -529,6 +677,7 @@ function recoverInterruptedTasks() {
 }
 
 importLegacyState();
+recoverInterruptedAgentProcesses();
 recoverInterruptedTasks();
 
 async function exists(path) { try { await stat(path); return true; } catch { return false; } }
@@ -826,16 +975,33 @@ async function runGroupTurn(session, member, round, phase) {
         let output = '';
         let settled = false;
         let timedOut = false;
-        const finish = result => { if (settled) return; settled = true; clearTimeout(timer); groupProcesses.delete(id); resolveTurn({ ...result, output }); };
+        const processId = startAgentProcessRecord({
+          kind: 'group_turn', entityId: id, runId: session.run_id, sessionId: session.id, agent: member.agent,
+          child, command: adapter.command, args, timeoutMs, attempt,
+          metadata: { memberId: member.id, round, phase }
+        });
+        const finish = result => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          groupProcesses.delete(id);
+          const cancelled = getGroupSession(session.id)?.status === 'cancelled';
+          finishAgentProcessRecord(processId, {
+            status: cancelled ? 'cancelled' : result.ok ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
+            exitCode: result.code,
+            reason: result.ok ? null : result.error?.message || `Group turn exited with ${result.code}.`
+          });
+          resolveTurn({ ...result, output });
+        };
         const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
-        groupProcesses.set(id, { child, timer, sessionId: session.id });
+        groupProcesses.set(id, { child, timer, sessionId: session.id, processId });
         releaseAgentSlot();
         releaseAgentSlot = null;
         db.prepare("UPDATE group_turns SET status = 'running', process_pid = ?, attempts = ?, started_at = ? WHERE id = ?").run(child.pid || null, attempt, now(), id);
         broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'running', attempt });
         child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, pseudoTask, prompt, promptFile));
-        child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); });
-        child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); });
+        child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); touchAgentProcessOutput(processId); });
+        child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); touchAgentProcessOutput(processId); });
         child.once('error', error => finish({ ok: false, error, code: null }));
         child.once('close', code => finish({ ok: !timedOut && code === 0, code, error: timedOut ? new Error(`Group turn timed out after ${timeoutMs}ms.`) : null }));
       });
@@ -1040,13 +1206,18 @@ async function startTask(task, source = 'manual') {
     task = updateTask(task.id, { status: 'running', output: '', process_pid: null, attempts: task.attempts + 1, max_retries: maxRetries, timeout_ms: timeoutMs, started_at: now(), finished_at: null, recovery_note: null });
     appendEvent('agent', `${task.id} started ${task.agent} (${source})`, task.id);
     const child = spawn(adapter.command, args, { cwd: task.worktree, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: task.worktree, AOD_TASK_STAGE: roleAssignment ? 'execute' : 'task', AOD_TASK_FILES: JSON.stringify(task.files) } });
+    const processId = startAgentProcessRecord({
+      kind: roleAssignment ? 'role_execute' : 'task', entityId: task.id, runId: task.run_id, taskId: task.id,
+      sessionId: roleAssignment?.session_id || null, agent: task.agent, child, command: adapter.command, args,
+      timeoutMs, attempt: task.attempts, metadata: { source, stage: roleAssignment ? 'execute' : 'task' }
+    });
     const timer = setTimeout(() => { const entry = taskProcesses.get(task.id); if (entry) entry.timedOut = true; child.kill(); }, timeoutMs);
-    taskProcesses.set(task.id, { child, timer, timedOut: false });
+    taskProcesses.set(task.id, { child, timer, timedOut: false, processId });
     releaseAgentSlot();
     updateTask(task.id, { process_pid: child.pid || null });
     child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, task, prompt));
-    child.stdout.on('data', data => { try { appendOutput(task.id, data.toString(), 'stdout'); } catch {} });
-    child.stderr.on('data', data => { try { appendOutput(task.id, data.toString(), 'stderr'); } catch {} });
+    child.stdout.on('data', data => { try { appendOutput(task.id, data.toString(), 'stdout'); touchAgentProcessOutput(processId); } catch {} });
+    child.stderr.on('data', data => { try { appendOutput(task.id, data.toString(), 'stderr'); touchAgentProcessOutput(processId); } catch {} });
     child.once('error', error => finishTaskProcess(task.id, child, { ok: false, error, code: null }).catch(() => {}));
     child.once('close', code => finishTaskProcess(task.id, child, { ok: code === 0, code }).catch(() => {}));
     return getTask(task.id);
@@ -1062,8 +1233,16 @@ async function finishTaskProcess(id, child, outcome) {
   taskProcesses.delete(id);
   const task = requireTask(id);
   const roleAssignment = getTaskRoleAssignment(id);
-  if (task.status !== 'running') return;
+  if (task.status !== 'running') {
+    finishAgentProcessRecord(entry.processId, { status: 'cancelled', exitCode: outcome.code, reason: `Task entered ${task.status} before the process closed.` });
+    return;
+  }
   const errorText = entry.timedOut ? `Agent timed out after ${task.timeout_ms}ms.` : outcome.error?.message;
+  finishAgentProcessRecord(entry.processId, {
+    status: outcome.ok ? 'succeeded' : entry.timedOut ? 'timed_out' : 'failed',
+    exitCode: outcome.code,
+    reason: outcome.ok ? null : errorText || `Agent exited with ${outcome.code}.`
+  });
   if (outcome.ok) {
     updateTask(id, { status: 'verifying', process_pid: null, last_exit_code: outcome.code, finished_at: now() });
     if (getTaskRoleAssignment(id)) updateTaskRoleAssignment(id, { stage: 'verifying' });
@@ -1197,15 +1376,21 @@ async function startReview(task) {
     });
     let output = '';
     const timeoutMs = Number(adapter.timeoutMs || config.defaults?.reviewTimeoutMs || 600000);
-    const timer = setTimeout(() => child.kill(), timeoutMs);
-    reviewProcesses.set(review.id, { child, timer, area, finishing: false });
+    let timedOut = false;
+    const processId = startAgentProcessRecord({
+      kind: 'conflict_review', entityId: review.id, runId: task.run_id, taskId: task.id, agent,
+      child, command: adapter.command, args: adapter.reviewArgs.map(value => expand(value, reviewTask, prompt)),
+      timeoutMs, metadata: { worktree: area }
+    });
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    reviewProcesses.set(review.id, { child, timer, area, finishing: false, processId });
     releaseAgentSlot();
     db.prepare('UPDATE reviews SET status = ?, reviewer_agent = ?, updated_at = ? WHERE id = ?').run('running', agent, now(), review.id);
     appendEvent('review', `${review.id} reviewer agent started`, task.id);
     child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, reviewTask, prompt));
-    child.stdout.on('data', data => { output = `${output}${data}`.slice(-24000); });
-    child.stderr.on('data', data => { output = `${output}${data}`.slice(-24000); });
-    const finish = async candidateStatus => {
+    child.stdout.on('data', data => { output = `${output}${data}`.slice(-24000); touchAgentProcessOutput(processId); });
+    child.stderr.on('data', data => { output = `${output}${data}`.slice(-24000); touchAgentProcessOutput(processId); });
+    const finish = async (candidateStatus, outcome = {}) => {
       const active = reviewProcesses.get(review.id);
       if (!active || active.child !== child || active.finishing) return;
       active.finishing = true;
@@ -1222,11 +1407,16 @@ async function startReview(task) {
       }
       try { await git(['worktree', 'remove', '--force', area]); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
       reviewProcesses.delete(review.id);
+      finishAgentProcessRecord(processId, {
+        status: status === 'suggested' ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
+        exitCode: outcome.code ?? null,
+        reason: status === 'suggested' ? null : timedOut ? `Conflict reviewer timed out after ${timeoutMs}ms.` : outcome.error?.message || 'Conflict reviewer failed or modified its worktree.'
+      });
       db.prepare('UPDATE reviews SET status = ?, suggestion = ?, updated_at = ? WHERE id = ?').run(status, output, now(), review.id);
       appendEvent('review', `${review.id} reviewer ${status}`, task.id);
     };
-    child.once('error', () => { finish('failed').catch(() => {}); });
-    child.once('close', code => { finish(code === 0 ? 'suggested' : 'failed').catch(() => {}); });
+    child.once('error', error => { finish('failed', { error }).catch(() => {}); });
+    child.once('close', code => { finish(code === 0 ? 'suggested' : 'failed', { code }).catch(() => {}); });
     return reviewFromRow(db.prepare('SELECT * FROM reviews WHERE id = ?').get(review.id));
   } finally {
     releaseAgentSlot();
@@ -1303,13 +1493,25 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
       let output = '';
       let settled = false;
       let timedOut = false;
+      const assignment = getTaskRoleAssignment(task.id);
+      const processId = startAgentProcessRecord({
+        kind: `role_${stage}`, entityId: task.id, runId: task.run_id, taskId: task.id, sessionId: session.id,
+        agent: member.agent, child, command: adapter.command, args, timeoutMs,
+        attempt: Math.max(1, Number(assignment?.repair_count || 0) + 1), metadata: { memberId: member.id, stage }
+      });
       const finish = (error, code) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         roleProcesses.delete(key);
         try { rm(promptFile, { force: true }); } catch {}
-        if (getGroupSession(session.id)?.status === 'cancelled') {
+        const cancelled = getGroupSession(session.id)?.status === 'cancelled';
+        finishAgentProcessRecord(processId, {
+          status: cancelled ? 'cancelled' : !error && !timedOut && code === 0 ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
+          exitCode: code,
+          reason: cancelled ? 'Group session was cancelled.' : error?.message || (timedOut ? `${stage} timed out after ${timeoutMs}ms.` : code === 0 ? null : `${stage} exited with ${code}.`)
+        });
+        if (cancelled) {
           rejectRole(new Error('Group session was cancelled.'));
           return;
         }
@@ -1317,11 +1519,11 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
         else resolveRole(redactSecrets(output).slice(-12000).trim());
       };
       const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
-      roleProcesses.set(key, { child, timer, sessionId: session.id, taskId: task.id, stage });
+      roleProcesses.set(key, { child, timer, sessionId: session.id, taskId: task.id, stage, processId });
       releaseAgentSlot();
       child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, invocationTask, prompt, promptFile));
-      child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); });
-      child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); });
+      child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); touchAgentProcessOutput(processId); });
+      child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); touchAgentProcessOutput(processId); });
       child.once('error', error => finish(error, null));
       child.once('close', code => finish(null, code));
     });
@@ -1515,22 +1717,31 @@ async function planWithCodex(requirement, planner = 'codex') {
       let output = '';
       let settled = false;
       let timedOut = false;
+      const processId = startAgentProcessRecord({
+        kind: 'planner', entityId: id, agent: planner, child, command: adapter.command, args,
+        timeoutMs, metadata: { requirementHash: createHash('sha256').update(requirement).digest('hex') }
+      });
       const finish = (error, code) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         plannerProcesses.delete(id);
+        finishAgentProcessRecord(processId, {
+          status: !error && !timedOut && code === 0 ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
+          exitCode: code,
+          reason: error?.message || (timedOut ? `Planner timed out after ${timeoutMs}ms.` : code === 0 ? null : `Planner exited with ${code}.`)
+        });
         if (timedOut) rejectPlan(new Error(`Planner timed out after ${timeoutMs}ms.`));
         else if (error) rejectPlan(error);
         else if (code === 0) resolvePlan(output);
         else rejectPlan(new Error(output.trim() || `Planner exited with ${code}.`));
       };
       const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
-      plannerProcesses.set(id, { child, timer });
+      plannerProcesses.set(id, { child, timer, processId });
       releaseAgentSlot();
       releaseAgentSlot = null;
-      child.stdout.on('data', data => { output += data; });
-      child.stderr.on('data', data => { output += data; });
+      child.stdout.on('data', data => { output += data; touchAgentProcessOutput(processId); });
+      child.stderr.on('data', data => { output += data; touchAgentProcessOutput(processId); });
       child.stdin.end(adapter.stdin === undefined ? undefined : String(adapter.stdin).replaceAll('{{prompt}}', prompt));
       child.once('error', error => finish(error, null));
       child.once('close', code => finish(null, code));
@@ -1802,7 +2013,12 @@ function publicState() {
     workspace: basename(root), mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
     agents, agentHealth: listAgentHealth(), approvals: buildApprovalInbox({ tasks, runs, reviews, groupSessions }), statuses, transitions, tasks, runs, groups, groupSessions, reviews,
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all(),
-    runtime: { activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size, activeRoleProcesses: roleProcesses.size, activePlanners: plannerProcesses.size, recoveryRequired: tasks.filter(task => task.status === 'recovery_required').length + groupSessions.filter(session => session.status === 'recovery_required').length },
+    runtime: {
+      activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size,
+      activeRoleProcesses: roleProcesses.size, activePlanners: plannerProcesses.size,
+      recoveryRequired: tasks.filter(task => task.status === 'recovery_required').length + groupSessions.filter(session => session.status === 'recovery_required').length,
+      processes: listAgentProcesses({ limit: 20 })
+    },
     stats: { total: tasks.length, runs: runs.length, groups: groups.length, groupSessions: groupSessions.length, worktrees: tasks.filter(task => task.worktree).length, mergeReady: tasks.filter(task => task.status === 'merge_ready').length, conflicts: tasks.filter(task => task.status === 'conflict_review').length }
   };
 }
@@ -1823,6 +2039,7 @@ async function api(request, response, url) {
     return;
   }
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
+  if (request.method === 'GET' && url.pathname === '/api/processes') return send(response, 200, listAgentProcesses({ limit: url.searchParams.get('limit'), runId: url.searchParams.get('runId') }));
   if (request.method === 'GET' && url.pathname === '/api/github/status') return send(response, 200, await githubStatus());
   if (request.method === 'GET' && url.pathname === '/api/approvals') return send(response, 200, currentApprovals());
   if (request.method === 'POST' && url.pathname === '/api/approvals/action') return send(response, 200, await executeApprovalAction(await body(request)));

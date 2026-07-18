@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const fixture = await mkdtemp(join(tmpdir(), 'aod-integration-'));
 const port = 4928;
-const files = ['.gitignore', 'server.mjs', 'approval-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const files = ['.gitignore', 'server.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {
@@ -186,6 +186,24 @@ try {
   await api(`/api/tasks/${first.id}/start`, { method: 'POST', body: '{}' });
   assert.equal((await waitForTaskStatus(first.id, 'merge_ready')).last_exit_code, 0);
   assert.equal((await api(`/api/tasks/${first.id}/logs`)).length > 0, true);
+  const firstProcess = (await api('/api/processes')).find(item => item.task_id === first.id && item.kind === 'task');
+  assert.equal('metadata_json' in firstProcess, false, 'Process API leaked raw metadata JSON.');
+  assert.equal(firstProcess.input_tokens, null);
+  assert.equal(firstProcess.output_tokens, null);
+  assert.equal(firstProcess.cost_usd, null);
+  assert.deepEqual({
+    agent: firstProcess.agent,
+    status: firstProcess.status,
+    exitCode: firstProcess.exit_code,
+    pidRecorded: Number.isInteger(firstProcess.pid),
+    heartbeatRecorded: typeof firstProcess.heartbeat_at === 'string',
+    outputRecorded: typeof firstProcess.last_output_at === 'string',
+    leaseOwnerRecorded: typeof firstProcess.lease_owner === 'string',
+    timeoutRecorded: firstProcess.timeout_ms > 0
+  }, {
+    agent: 'codex', status: 'succeeded', exitCode: 0, pidRecorded: true, heartbeatRecorded: true,
+    outputRecorded: true, leaseOwnerRecorded: true, timeoutRecorded: true
+  });
   assert.equal((await readSseInitialState()).includes('event: state'), true);
   await api(`/api/tasks/${first.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'failed' }) });
 
@@ -418,11 +436,34 @@ try {
     recoveryDb.prepare("UPDATE group_sessions SET status = 'recovery_required' WHERE id = ?").run(groupSession.id);
     recoveryDb.prepare("UPDATE tasks SET status = 'recovery_required' WHERE id = ?").run(groupTask.id);
     recoveryDb.prepare("UPDATE task_role_assignments SET stage = 'recovery_required', review_json = NULL WHERE task_id = ?").run(groupTask.id);
+    const insertInterruptedProcess = recoveryDb.prepare(`INSERT INTO agent_processes(
+      id, kind, entity_id, agent, status, pid, lease_owner, lease_expires_at, heartbeat_at, started_at, timeout_ms, attempt
+    ) VALUES (?, 'planner', ?, 'codex', 'running', ?, 'previous-daemon', ?, ?, ?, 600000, 1)`);
+    const freshLease = new Date(Date.now() + 60000).toISOString();
+    const expiredLease = new Date(Date.now() - 60000).toISOString();
+    const startedAt = new Date(Date.now() - 120000).toISOString();
+    insertInterruptedProcess.run('AP-RECOVERY-STALE', 'planner:stale', 2147483647, freshLease, freshLease, startedAt);
+    insertInterruptedProcess.run('AP-RECOVERY-LIVE', 'planner:live', process.pid, freshLease, freshLease, startedAt);
+    insertInterruptedProcess.run('AP-RECOVERY-UNVERIFIABLE', 'planner:unverifiable', process.pid, expiredLease, expiredLease, startedAt);
   } finally {
     recoveryDb.close();
   }
   daemon = spawn(process.execPath, ['server.mjs'], { cwd: fixture, env: { ...process.env, PORT: String(port) }, windowsHide: true });
   await waitForHealth();
+  const recoveredProcesses = new Map((await api('/api/processes?limit=500')).map(item => [item.id, item]));
+  assert.deepEqual(
+    ['AP-RECOVERY-STALE', 'AP-RECOVERY-LIVE', 'AP-RECOVERY-UNVERIFIABLE'].map(id => ({
+      id,
+      status: recoveredProcesses.get(id)?.status,
+      recoveryState: recoveredProcesses.get(id)?.recovery_state,
+      finished: typeof recoveredProcesses.get(id)?.finished_at === 'string'
+    })),
+    [
+      { id: 'AP-RECOVERY-STALE', status: 'recovery_required', recoveryState: 'stale', finished: true },
+      { id: 'AP-RECOVERY-LIVE', status: 'recovery_required', recoveryState: 'live', finished: true },
+      { id: 'AP-RECOVERY-UNVERIFIABLE', status: 'recovery_required', recoveryState: 'unverifiable', finished: true }
+    ]
+  );
   const resumedExecution = await api(`/api/group-sessions/${groupSession.id}/resume`, { method: 'POST', body: '{}' });
   assert.equal(resumedExecution.status, 'executing');
   await waitForTaskStatus(groupTask.id, 'reviewing');
@@ -609,6 +650,15 @@ try {
   await api(`/api/tasks/${failed.id}/prepare`, { method: 'POST', body: '{}' });
   await api(`/api/tasks/${failed.id}/start`, { method: 'POST', body: '{}' });
   assert.equal((await waitForTaskStatus(failed.id, 'failed')).last_exit_code, 7);
+  const processHistory = await api('/api/processes?limit=500');
+  const processKinds = new Set(processHistory.map(item => item.kind));
+  for (const kind of ['task', 'group_turn', 'role_execute', 'role_review', 'role_repair', 'conflict_review', 'planner']) {
+    assert.equal(processKinds.has(kind), true, `Process ledger is missing ${kind}.`);
+  }
+  assert.equal(processHistory.some(item => item.task_id === timeout.id && item.status === 'timed_out'), true);
+  assert.equal(processHistory.some(item => item.task_id === failed.id && item.status === 'failed' && item.exit_code === 7), true);
+  assert.equal(processHistory.some(item => item.run_id === groupRun.id && item.session_id === groupSession.id), true);
+  assert.equal(processHistory.every(item => item.status !== 'running'), true, 'Settled integration fixtures left a running process ledger row.');
   const consoleHtml = await readFile(join(process.cwd(), 'index.html'), 'utf8');
   for (const id of ['groupsBoard', 'openGroupDialog', 'groupDialog', 'groupConsole', 'groupMessages', 'groupConsensus']) {
     assert.equal(consoleHtml.includes(`id="${id}"`), true, `Console is missing #${id}.`);
