@@ -208,6 +208,8 @@ try {
   await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'manual', maxConcurrency: 2 }) });
   const first = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Manual task', agent: 'codex', files: ['README.md'], acceptance: 'node --check server.mjs' }) });
   assert.equal(first.status, 'draft');
+  assert.equal(first.workspaceId, 'WS-001');
+  assert.equal(first.workspacePath, fixture);
 
   const hybrid = await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'hybrid', maxConcurrency: 2 }) });
   assert.equal(hybrid.tasks.find(task => task.id === first.id).status, 'ready');
@@ -234,6 +236,17 @@ try {
     agent: 'codex', status: 'succeeded', exitCode: 0, pidRecorded: true, heartbeatRecorded: true,
     outputRecorded: true, leaseOwnerRecorded: true, timeoutRecorded: true
   });
+  await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'manual', maxConcurrency: 2 }) });
+  await api(`/api/workspaces/${registeredWorkspace.id}/select`, { method: 'POST', body: '{}' });
+  const secondaryTask = await api('/api/tasks', { method: 'POST', body: JSON.stringify({
+    title: 'Secondary workspace binding', agent: 'codex', files: ['secondary-note.md'], acceptance: 'node --check server.mjs'
+  }) });
+  await api('/api/workspaces/WS-001/select', { method: 'POST', body: '{}' });
+  const boundAfterSwitch = (await api('/api/state')).tasks.find(task => task.id === secondaryTask.id);
+  assert.equal(boundAfterSwitch.workspaceId, registeredWorkspace.id);
+  assert.equal(boundAfterSwitch.workspacePath, secondaryWorkspace);
+  await api(`/api/tasks/${secondaryTask.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'cancelled' }) });
+  await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'hybrid', maxConcurrency: 2 }) });
   assert.equal((await readSseInitialState()).includes('event: state'), true);
   await api(`/api/tasks/${first.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'failed' }) });
 
@@ -270,8 +283,12 @@ try {
   const [plan, planningMaximum] = await Promise.all([planningRequest, observeActiveAgentsUntilSettled(planningRequest)]);
   assert.equal(planningMaximum, 1, 'Planner did not reserve a global agent slot.');
   assert.equal(plan.tasks.length, 1);
+  assert.equal(plan.workspaceId, 'WS-001');
+  assert.equal(plan.workspacePath, fixture);
   const deliveryRun = await api('/api/runs', { method: 'POST', body: JSON.stringify({ planId: plan.id }) });
   assert.equal(deliveryRun.status, 'active');
+  assert.equal(deliveryRun.workspaceId, 'WS-001');
+  assert.equal(deliveryRun.tasks.every(task => task.workspaceId === 'WS-001'), true);
   await stat(deliveryRun.integration_worktree);
   const runState = await api(`/api/runs/${deliveryRun.id}`);
   assert.equal(runState.tasks.length, 1);
@@ -394,6 +411,8 @@ try {
   assert.equal((await api(`/api/group-sessions/${multiSeatSession.id}/messages?after=0`)).filter(message => message.sender_kind === 'member').length, 10);
 
   const groupSession = await api(`/api/groups/${group.id}/sessions`, { method: 'POST', body: JSON.stringify({ requirement: 'Discuss and create a group delivery note.' }) });
+  assert.equal(groupSession.workspaceId, 'WS-001');
+  assert.equal(groupSession.workspacePath, fixture);
   assert.equal(groupSession.status, 'draft');
   await api(`/api/group-sessions/${groupSession.id}/start`, { method: 'POST', body: '{}' });
   const observedDiscussion = await observeGroupSessionConcurrency(groupSession.id);

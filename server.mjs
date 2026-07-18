@@ -348,20 +348,30 @@ function activeWorkspace() {
   return requireWorkspace(getSetting('active_workspace_id'));
 }
 
+function workspaceForEntity(entity) {
+  if (!entity?.workspace_id) throw workspaceError('WORKSPACE_BINDING_MISSING', 'This entity is not bound to a project workspace.');
+  return requireWorkspace(entity.workspace_id);
+}
+
+function withWorkspaceIdentity(entity) {
+  if (!entity) return null;
+  return { ...entity, ...workspaceIdentity(getWorkspace(entity.workspace_id)) };
+}
+
 function taskFromRow(row) {
   if (!row) return null;
-  return {
+  return withWorkspaceIdentity({
     ...row,
     files: json(row.files_json, []),
     dependsOn: json(row.depends_json, []),
     verification: json(row.verification_json, null),
     locked: Boolean(row.locked)
-  };
+  });
 }
 
 function runFromRow(row) {
   if (!row) return null;
-  return { ...row, ci: json(row.ci_json, null) };
+  return withWorkspaceIdentity({ ...row, ci: json(row.ci_json, null) });
 }
 
 function reviewFromRow(row) {
@@ -385,14 +395,14 @@ function listGroups() { return db.prepare("SELECT * FROM agent_groups WHERE stat
 function getGroup(id) { return groupFromRow(db.prepare('SELECT * FROM agent_groups WHERE id = ?').get(id)); }
 function groupSessionFromRow(row) {
   if (!row) return null;
-  return {
+  return withWorkspaceIdentity({
     ...row,
     members: json(row.member_snapshot_json, []),
     consensus: json(row.consensus_json, null),
     pause_requested: Boolean(row.pause_requested),
     turns: db.prepare('SELECT * FROM group_turns WHERE session_id = ? ORDER BY created_at ASC').all(row.id),
     assignments: db.prepare('SELECT * FROM task_role_assignments WHERE session_id = ? ORDER BY task_id ASC').all(row.id).map(item => ({ ...item, review: json(item.review_json, null) }))
-  };
+  });
 }
 function getGroupSession(id) { return groupSessionFromRow(db.prepare('SELECT * FROM group_sessions WHERE id = ?').get(id)); }
 function listGroupSessions() { return db.prepare('SELECT * FROM group_sessions ORDER BY created_at DESC').all().map(groupSessionFromRow); }
@@ -441,13 +451,14 @@ function createGroupSession(group, payload) {
   if (group.status !== 'active') throw new Error('Only active groups can create sessions.');
   const id = `GS-${String(Number(db.prepare('SELECT COUNT(*) AS count FROM group_sessions').get().count) + 1).padStart(3, '0')}`;
   const createdAt = now();
+  const workspaceId = activeWorkspace().id;
   const snapshot = group.members.filter(member => member.enabled).map(member => ({
     id: member.id, key: member.key, agent: member.agent, role: member.role, displayName: member.display_name,
     instructions: member.instructions, isModerator: member.is_moderator
   }));
-  db.prepare(`INSERT INTO group_sessions(id, group_id, requirement, member_snapshot_json, status, current_round, max_rounds, max_repairs, pause_requested, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'draft', 0, ?, ?, 0, ?, ?)`)
-    .run(id, group.id, payload.requirement.trim(), JSON.stringify(snapshot), group.max_rounds, group.max_repairs, createdAt, createdAt);
+  db.prepare(`INSERT INTO group_sessions(id, group_id, requirement, member_snapshot_json, status, current_round, max_rounds, max_repairs, pause_requested, workspace_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'draft', 0, ?, ?, 0, ?, ?, ?)`)
+    .run(id, group.id, payload.requirement.trim(), JSON.stringify(snapshot), group.max_rounds, group.max_repairs, workspaceId, createdAt, createdAt);
   appendEvent('group_session', `${id} created for ${group.id}`);
   return requireGroupSession(id);
 }
@@ -553,7 +564,11 @@ function broadcast(type, payload) {
 
 function appendEvent(type, message, taskId = null, runId = null) {
   const derivedRunId = runId || (taskId ? getTask(taskId)?.run_id : null) || null;
-  db.prepare('INSERT INTO events(id, at, type, message, task_id, run_id) VALUES (?, ?, ?, ?, ?, ?)').run(crypto.randomUUID(), now(), type, message, taskId, derivedRunId);
+  const workspaceId = (taskId ? getTask(taskId)?.workspace_id : null)
+    || (derivedRunId ? getRun(derivedRunId)?.workspace_id : null)
+    || getSetting('active_workspace_id') || null;
+  db.prepare('INSERT INTO events(id, at, type, message, task_id, run_id, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(crypto.randomUUID(), now(), type, message, taskId, derivedRunId, workspaceId);
   broadcast('event', { type, message, taskId, runId: derivedRunId, at: now() });
 }
 
@@ -564,11 +579,11 @@ function redactSecrets(value) {
 function processFromRow(row) {
   if (!row) return null;
   const { metadata_json: metadataJson, ...fields } = row;
-  return {
+  return withWorkspaceIdentity({
     ...fields,
     terminal_reason: row.terminal_reason ? redactSecrets(row.terminal_reason) : null,
     metadata: json(redactSecrets(metadataJson || '{}'), {})
-  };
+  });
 }
 
 function listAgentProcesses({ limit = 100, runId = null } = {}) {
@@ -597,15 +612,18 @@ function processMetrics({ from = null, to = null, runId = null } = {}) {
 
 function leaseExpiry(at = Date.now()) { return new Date(at + processLeaseMs).toISOString(); }
 
-function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, sessionId = null, agent, child, command, args = [], timeoutMs, attempt = 1, metadata = {} }) {
+function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, sessionId = null, workspaceId = null, agent, child, command, args = [], timeoutMs, attempt = 1, metadata = {} }) {
   const id = `AP-${crypto.randomUUID()}`;
   const startedAt = now();
   const commandHash = createHash('sha256').update(JSON.stringify([command, args])).digest('hex');
+  const boundWorkspaceId = workspaceId || (taskId ? getTask(taskId)?.workspace_id : null)
+    || (runId ? getRun(runId)?.workspace_id : null) || (sessionId ? getGroupSession(sessionId)?.workspace_id : null)
+    || getSetting('active_workspace_id') || null;
   db.prepare(`INSERT INTO agent_processes(
-    id, kind, entity_id, run_id, task_id, session_id, agent, status, pid, lease_owner, lease_expires_at,
+    id, kind, entity_id, run_id, task_id, session_id, workspace_id, agent, status, pid, lease_owner, lease_expires_at,
     heartbeat_at, started_at, timeout_ms, attempt, command_hash, metadata_json
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    id, kind, entityId, runId, taskId, sessionId, agent, child.pid || null, daemonLeaseOwner, leaseExpiry(),
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, kind, entityId, runId, taskId, sessionId, boundWorkspaceId, agent, child.pid || null, daemonLeaseOwner, leaseExpiry(),
     startedAt, startedAt, timeoutMs, Math.max(1, Number(attempt) || 1), commandHash, JSON.stringify(metadata || {})
   );
   const heartbeat = setInterval(() => {
@@ -813,7 +831,7 @@ function runShell(command, cwd, timeoutMs) {
   });
 }
 async function git(args, cwd = root, timeoutMs) { return run('git', args, cwd, timeoutMs); }
-async function gitReady() { try { await git(['rev-parse', '--is-inside-work-tree']); await git(['rev-parse', '--verify', 'HEAD']); return true; } catch { return false; } }
+async function gitReady(cwd = root) { try { await git(['rev-parse', '--is-inside-work-tree'], cwd); await git(['rev-parse', '--verify', 'HEAD'], cwd); return true; } catch { return false; } }
 async function gitClean(cwd = root) { return (await git(['status', '--porcelain'], cwd)).stdout.trim() === ''; }
 
 function workspaceError(code, message) {
@@ -1384,19 +1402,21 @@ async function recoverGroupTurn(turn, payload) {
 async function prepareTask(task, source = 'manual') {
   if (task.status !== 'draft') throw new Error('Only draft tasks can prepare a worktree.');
   if (!dependenciesComplete(task) && task.dependsOn.length) throw new Error('Dependencies must be merged before preparing this task.');
-  if (!(await gitReady())) throw new Error('This workspace needs an initialized Git repository with at least one commit.');
+  const workspace = workspaceForEntity(task);
+  const workspaceRoot = workspace.git_root;
+  if (!(await gitReady(workspaceRoot))) throw new Error('This workspace needs an initialized Git repository with at least one commit.');
   const run = task.run_id ? requireRun(task.run_id) : null;
   const baseRef = run ? run.integration_branch : 'HEAD';
   updateTask(task.id, { status: 'preparing' });
-  const area = join(dirname(root), `${basename(root)}.aod-worktrees`);
+  const area = join(dirname(workspaceRoot), `${basename(workspaceRoot)}.aod-worktrees`, workspace.id);
   const location = join(area, task.id);
   try {
     await mkdir(area, { recursive: true });
     if (await exists(location)) {
-      try { await git(['worktree', 'remove', '--force', location]); } catch { await rm(location, { recursive: true, force: true }); }
+      try { await git(['worktree', 'remove', '--force', location], workspaceRoot); } catch { await rm(location, { recursive: true, force: true }); }
     }
-    await git(['worktree', 'add', '-b', task.branch, location, baseRef]);
-    const prepared = updateTask(task.id, { status: 'ready', worktree: location, base_commit: (await git(['rev-parse', baseRef])).stdout.trim(), recovery_note: null });
+    await git(['worktree', 'add', '-b', task.branch, location, baseRef], workspaceRoot);
+    const prepared = updateTask(task.id, { status: 'ready', worktree: location, base_commit: (await git(['rev-parse', baseRef], workspaceRoot)).stdout.trim(), recovery_note: null });
     await writeHandoff(prepared);
     appendEvent('worktree', `${task.id} worktree prepared (${source})`, task.id);
     return prepared;
@@ -1519,7 +1539,7 @@ async function verifyTask(task, source = 'manual') {
   }
 }
 
-async function createConflictReview(task, error, cwd = root) {
+async function createConflictReview(task, error, cwd = workspaceForEntity(task).git_root) {
   const files = (await git(['diff', '--name-only', '--diff-filter=U'], cwd)).stdout.trim().split(/\r?\n/).filter(Boolean);
   const diff = (await git(['diff', '--no-ext-diff'], cwd)).stdout.slice(-24000);
   try { await git(['merge', '--abort'], cwd); } catch {}
@@ -1534,17 +1554,18 @@ async function createConflictReview(task, error, cwd = root) {
 
 async function mergeTask(task, source = 'manual') {
   if (task.status !== 'merge_ready') throw new Error('Only verified tasks can enter the merge gate.');
-  if (!(await gitReady())) throw new Error('The main repository is not ready for merging.');
+  const workspaceRoot = workspaceForEntity(task).git_root;
+  if (!(await gitReady(workspaceRoot))) throw new Error('The main repository is not ready for merging.');
   const run = task.run_id ? requireRun(task.run_id) : null;
   const branch = run ? run.integration_branch : (getSetting('integration_branch') || 'main');
-  const cwd = run?.integration_worktree || root;
+  const cwd = run?.integration_worktree || workspaceRoot;
   if (run && !run.integration_worktree) throw new Error('Run integration worktree is missing.');
   const currentBranch = (await git(['branch', '--show-current'], cwd)).stdout.trim();
   if (currentBranch !== branch) throw new Error(`Merge must run from ${branch}, currently on ${currentBranch || 'detached HEAD'}.`);
   if (!(await gitClean(cwd))) throw new Error('Integration branch has uncommitted changes. Commit or stash them before merging.');
-  const branchHead = (await git(['rev-parse', task.branch])).stdout.trim();
+  const branchHead = (await git(['rev-parse', task.branch], cwd)).stdout.trim();
   if (task.verified_commit !== branchHead) throw new Error('Task branch changed after verification. Run verification again.');
-  const ahead = Number((await git(['rev-list', '--count', `HEAD..${task.branch}`])).stdout.trim());
+  const ahead = Number((await git(['rev-list', '--count', `HEAD..${task.branch}`], cwd)).stdout.trim());
   if (ahead < 1) throw new Error('The task branch has no commits to merge.');
   updateTask(task.id, { status: 'merging' });
   try {
@@ -1580,13 +1601,14 @@ async function startReview(task) {
     const agent = config.reviewerAgent || review.reviewer_agent;
     const adapter = config.agents[agent];
     if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.reviewArgs)) throw new Error(`No read-only reviewer adapter is configured for ${agent}.`);
-    area = join(dirname(root), `${basename(root)}.aod-conflict-reviews`, review.id);
+    const workspaceRoot = workspaceForEntity(task).git_root;
+    area = join(dirname(workspaceRoot), `${basename(workspaceRoot)}.aod-conflict-reviews`, task.workspace_id, review.id);
     if (await exists(area)) {
-      try { await git(['worktree', 'remove', '--force', area]); } catch { await rm(area, { recursive: true, force: true }); }
+      try { await git(['worktree', 'remove', '--force', area], workspaceRoot); } catch { await rm(area, { recursive: true, force: true }); }
     }
     await mkdir(dirname(area), { recursive: true });
     const reviewCommit = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
-    await git(['worktree', 'add', '--detach', area, reviewCommit]);
+    await git(['worktree', 'add', '--detach', area, reviewCommit], workspaceRoot);
     const reviewTask = { ...task, worktree: area };
     const prompt = [
       'You are a read-only merge conflict reviewer. Do not modify files or run write commands.',
@@ -1628,7 +1650,7 @@ async function startReview(task) {
           if (head.stdout.trim() !== reviewCommit || changes.stdout.trim()) status = 'failed';
         } catch { status = 'failed'; }
       }
-      try { await git(['worktree', 'remove', '--force', area]); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
+      try { await git(['worktree', 'remove', '--force', area], workspaceRoot); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
       reviewProcesses.delete(review.id);
       finishAgentProcessRecord(processId, {
         status: status === 'suggested' ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
@@ -1762,12 +1784,13 @@ async function inspectGroupTask(task) {
   const session = requireGroupSession(assignment.session_id);
   const reviewer = session.members.find(member => member.id === assignment.reviewer_member_id);
   if (!reviewer) throw new Error('Assigned reviewer is missing from the session snapshot.');
-  const area = join(dirname(root), `${basename(root)}.aod-role-reviews`, task.id);
+  const workspaceRoot = workspaceForEntity(task).git_root;
+  const area = join(dirname(workspaceRoot), `${basename(workspaceRoot)}.aod-role-reviews`, task.workspace_id, task.id);
   if (await exists(area)) {
-    try { await git(['worktree', 'remove', '--force', area]); } catch { await rm(area, { recursive: true, force: true }); }
+    try { await git(['worktree', 'remove', '--force', area], workspaceRoot); } catch { await rm(area, { recursive: true, force: true }); }
   }
   await mkdir(dirname(area), { recursive: true });
-  await git(['worktree', 'add', '--detach', area, task.verified_commit]);
+  await git(['worktree', 'add', '--detach', area, task.verified_commit], workspaceRoot);
   try {
     const diff = (await git(['diff', '--stat', `${task.base_commit}..${task.verified_commit}`], area)).stdout;
     const prompt = [
@@ -1803,7 +1826,7 @@ async function inspectGroupTask(task) {
     }
     return getTask(task.id);
   } finally {
-    try { await git(['worktree', 'remove', '--force', area]); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
+    try { await git(['worktree', 'remove', '--force', area], workspaceRoot); } catch { try { await rm(area, { recursive: true, force: true }); } catch {} }
   }
 }
 
@@ -1918,7 +1941,9 @@ function extractJson(text) {
   return json(candidate, null);
 }
 
-async function planWithCodex(requirement, planner = 'codex') {
+async function planWithCodex(requirement, planner = 'codex', workspaceId = activeWorkspace().id) {
+  const workspace = requireWorkspace(workspaceId);
+  const workspaceRoot = workspace.git_root;
   const config = await loadConfig();
   const adapter = config.planner || config.agents[planner];
   if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No planner adapter is configured for ${planner}.`);
@@ -1929,19 +1954,19 @@ async function planWithCodex(requirement, planner = 'codex') {
     'Tasks must have disjoint file ownership and an acyclic dependency graph. Every task needs a concrete acceptance command.',
     '', `Requirement:\n${requirement}`
   ].join('\n');
-  const args = adapter.args.map(value => String(value).replaceAll('{{prompt}}', prompt).replaceAll('{{worktree}}', root).replaceAll('{{taskId}}', 'planner').replaceAll('{{promptFile}}', ''));
+  const args = adapter.args.map(value => String(value).replaceAll('{{prompt}}', prompt).replaceAll('{{worktree}}', workspaceRoot).replaceAll('{{taskId}}', 'planner').replaceAll('{{promptFile}}', ''));
   const timeoutMs = Number(adapter.timeoutMs || config.defaults?.plannerTimeoutMs || 600000);
   let releaseAgentSlot = await acquireAgentSlot();
   let result;
   try {
     result = await new Promise((resolvePlan, rejectPlan) => {
       const id = `planner:${crypto.randomUUID()}`;
-      const child = spawn(adapter.command, args, { cwd: root, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(adapter.command, args, { cwd: workspaceRoot, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       let output = '';
       let settled = false;
       let timedOut = false;
       const processId = startAgentProcessRecord({
-        kind: 'planner', entityId: id, agent: planner, child, command: adapter.command, args,
+        kind: 'planner', entityId: id, workspaceId, agent: planner, child, command: adapter.command, args,
         timeoutMs, metadata: { requirementHash: createHash('sha256').update(requirement).digest('hex') }
       });
       const finish = (error, code) => {
@@ -1980,30 +2005,32 @@ async function planWithCodex(requirement, planner = 'codex') {
 }
 
 async function createRunFromPlan(plan, overrides = {}) {
-  if (!(await gitReady())) throw new Error('A Git repository with an initial commit is required.');
-  if (!(await gitClean(root))) throw new Error('Main worktree has uncommitted changes. Commit or stash them before creating a run.');
+  const workspace = workspaceForEntity(plan);
+  const workspaceRoot = workspace.git_root;
+  if (!(await gitReady(workspaceRoot))) throw new Error('A Git repository with an initial commit is required.');
+  if (!(await gitClean(workspaceRoot))) throw new Error('Main worktree has uncommitted changes. Commit or stash them before creating a run.');
   const tasks = validateDraftTasks(overrides.tasks || json(plan.dag_json, {}).tasks);
   for (const task of tasks) await acceptanceAllowed(task.acceptance, true);
   const baseBranch = getSetting('integration_branch') || 'main';
-  const baseCommit = (await git(['rev-parse', baseBranch])).stdout.trim();
+  const baseCommit = (await git(['rev-parse', baseBranch], workspaceRoot)).stdout.trim();
   const id = `RUN-${Date.now().toString(36).toUpperCase()}`;
   const integrationBranch = `aod/run-${id.toLowerCase()}`;
-  const area = join(dirname(root), `${basename(root)}.aod-runs`);
+  const area = join(dirname(workspaceRoot), `${basename(workspaceRoot)}.aod-runs`, workspace.id);
   const integrationWorktree = join(area, id);
-  const run = { id, title: String(overrides.title || json(plan.dag_json, {}).title || 'Untitled run').trim(), requirement: plan.requirement, planner: plan.planner, mode: currentMode(), status: 'creating', base_branch: baseBranch, integration_branch: integrationBranch, integration_worktree: integrationWorktree, base_commit: baseCommit, github_repo: null, github_pr_number: null, github_pr_url: null, ci_status: 'not_published', ci: null, created_at: now(), updated_at: now(), finished_at: null };
-  db.prepare('INSERT INTO runs(id, title, requirement, planner, mode, status, base_branch, integration_branch, integration_worktree, base_commit, github_repo, github_pr_number, github_pr_url, ci_status, ci_json, created_at, updated_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(run.id, run.title, run.requirement, run.planner, run.mode, run.status, run.base_branch, run.integration_branch, run.integration_worktree, run.base_commit, null, null, null, run.ci_status, null, run.created_at, run.updated_at, null);
+  const run = { id, title: String(overrides.title || json(plan.dag_json, {}).title || 'Untitled run').trim(), requirement: plan.requirement, planner: plan.planner, mode: currentMode(), status: 'creating', base_branch: baseBranch, integration_branch: integrationBranch, integration_worktree: integrationWorktree, base_commit: baseCommit, github_repo: null, github_pr_number: null, github_pr_url: null, ci_status: 'not_published', ci: null, workspace_id: workspace.id, created_at: now(), updated_at: now(), finished_at: null };
+  db.prepare('INSERT INTO runs(id, title, requirement, planner, mode, status, base_branch, integration_branch, integration_worktree, base_commit, github_repo, github_pr_number, github_pr_url, ci_status, ci_json, workspace_id, created_at, updated_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(run.id, run.title, run.requirement, run.planner, run.mode, run.status, run.base_branch, run.integration_branch, run.integration_worktree, run.base_commit, null, null, null, run.ci_status, null, run.workspace_id, run.created_at, run.updated_at, null);
   try {
     await mkdir(area, { recursive: true });
-    await git(['worktree', 'add', '-b', integrationBranch, integrationWorktree, baseBranch]);
+    await git(['worktree', 'add', '-b', integrationBranch, integrationWorktree, baseBranch], workspaceRoot);
     updateRun(id, { status: 'active' });
     const firstTaskIndex = Number(db.prepare('SELECT COUNT(*) AS count FROM tasks').get().count) + 1;
     const keyToId = new Map(tasks.map((task, index) => [task.key, `T-${String(firstTaskIndex + index).padStart(3, '0')}`]));
     for (let index = 0; index < tasks.length; index += 1) {
       const draft = tasks[index];
-      const task = { id: keyToId.get(draft.key), title: draft.title, agent: draft.agent, files: draft.files, dependsOn: draft.dependsOn.map(key => keyToId.get(key)), acceptance: draft.acceptance, status: 'draft', branch: `aod/${id.toLowerCase()}/${slug(draft.title)}`, worktree: null, run_id: id, base_commit: null, verified_commit: null, verification: null, output: '', process_pid: null, attempts: 0, max_retries: Math.max(0, draft.maxRetries), timeout_ms: Math.max(1000, draft.timeoutMs), locked: false, recovery_note: draft.risk || null, last_exit_code: null, created_at: now(), updated_at: now(), started_at: null, finished_at: null };
-      db.prepare(`INSERT INTO tasks (id, title, agent, files_json, depends_json, acceptance, status, branch, worktree, run_id, base_commit, verified_commit, verification_json, output, process_pid, attempts, max_retries, timeout_ms, locked, recovery_note, last_exit_code, created_at, updated_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(task.id, task.title, task.agent, JSON.stringify(task.files), JSON.stringify(task.dependsOn), task.acceptance, task.status, task.branch, null, task.run_id, null, null, null, '', null, 0, task.max_retries, task.timeout_ms, 0, task.recovery_note, null, task.created_at, task.updated_at, null, null);
+      const task = { id: keyToId.get(draft.key), title: draft.title, agent: draft.agent, files: draft.files, dependsOn: draft.dependsOn.map(key => keyToId.get(key)), acceptance: draft.acceptance, status: 'draft', branch: `aod/${id.toLowerCase()}/${slug(draft.title)}`, worktree: null, run_id: id, base_commit: null, verified_commit: null, verification: null, output: '', process_pid: null, attempts: 0, max_retries: Math.max(0, draft.maxRetries), timeout_ms: Math.max(1000, draft.timeoutMs), locked: false, recovery_note: draft.risk || null, last_exit_code: null, workspace_id: workspace.id, created_at: now(), updated_at: now(), started_at: null, finished_at: null };
+      db.prepare(`INSERT INTO tasks (id, title, agent, files_json, depends_json, acceptance, status, branch, worktree, run_id, base_commit, verified_commit, verification_json, output, process_pid, attempts, max_retries, timeout_ms, locked, recovery_note, last_exit_code, workspace_id, created_at, updated_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(task.id, task.title, task.agent, JSON.stringify(task.files), JSON.stringify(task.dependsOn), task.acceptance, task.status, task.branch, null, task.run_id, null, null, null, '', null, 0, task.max_retries, task.timeout_ms, 0, task.recovery_note, null, task.workspace_id, task.created_at, task.updated_at, null, null);
       db.prepare('INSERT INTO run_tasks(run_id, task_id, position) VALUES (?, ?, ?)').run(id, task.id, index);
       appendEvent('task', `${task.id} added to ${id}`, task.id, id);
     }
@@ -2043,8 +2070,8 @@ async function confirmGroupConsensus(session, payload) {
   const planId = `PLAN-GROUP-${session.id}`;
   const createdAt = now();
   const planDag = { title: String(consensus.title || 'Group run').trim(), tasks: normalizedTasks };
-  db.prepare('INSERT INTO plans(id, requirement, planner, dag_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(planId, session.requirement, `group:${session.group_id}`, JSON.stringify(planDag), 'ready', createdAt, createdAt);
+  db.prepare('INSERT INTO plans(id, requirement, planner, dag_json, status, workspace_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(planId, session.requirement, `group:${session.group_id}`, JSON.stringify(planDag), 'ready', session.workspace_id, createdAt, createdAt);
   const run = await createRunFromPlan(db.prepare('SELECT * FROM plans WHERE id = ?').get(planId), { title: planDag.title, tasks: normalizedTasks });
   const createdTasks = runTasks(run.id);
   db.exec('BEGIN');
@@ -2072,14 +2099,14 @@ function ghExecutable() {
 }
 async function gh(args, cwd = root, timeoutMs = 120000) { return run(ghExecutable(), args, cwd, timeoutMs); }
 async function githubAuthenticated() { try { await gh(['auth', 'status', '--hostname', 'github.com']); return true; } catch { return false; } }
-async function githubStatus() {
+async function githubStatus(workspace = activeWorkspace()) {
   const authenticated = await githubAuthenticated();
   let remote = null;
-  try { remote = (await git(['remote', 'get-url', 'origin'])).stdout.trim(); } catch {}
+  try { remote = (await git(['remote', 'get-url', 'origin'], workspace.git_root)).stdout.trim(); } catch {}
   const login = githubLogin && !githubLogin.completed
     ? { pending: true, deviceCode: githubLogin.deviceCode, deviceUrl: githubLogin.deviceUrl, startedAt: githubLogin.startedAt }
     : null;
-  return { available: await commandAvailable('gh'), authenticated, remote, login };
+  return { available: await commandAvailable('gh'), authenticated, remote, login, ...workspaceIdentity(workspace) };
 }
 async function commandAvailable(command) {
   try { await run(command === 'gh' ? ghExecutable() : command, ['--version'], root, 8000); return true; } catch { return false; }
@@ -2116,22 +2143,23 @@ function startGithubLogin() {
   });
   return { started: true, message: 'GitHub device authentication started. The authorization code will appear here shortly.' };
 }
-async function ensureGithubRemote(payload = {}) {
-  const status = await githubStatus();
+async function ensureGithubRemote(payload = {}, workspace = activeWorkspace()) {
+  const status = await githubStatus(workspace);
   if (!status.available) throw new Error('GitHub CLI is not installed. Install gh before connecting GitHub.');
   if (!status.authenticated) throw new Error('GitHub CLI is not authenticated. Start /api/github/connect first.');
   if (status.remote) return status.remote;
   if (!payload.repo || !/^[\w.-]+\/[\w.-]+$/.test(payload.repo)) throw new Error('No origin remote is configured. Provide repo as owner/name to create one.');
   const visibility = payload.visibility === 'public' ? '--public' : '--private';
-  await gh(['repo', 'create', payload.repo, visibility, '--source', '.', '--remote', 'origin', '--push']);
-  return (await git(['remote', 'get-url', 'origin'])).stdout.trim();
+  await gh(['repo', 'create', payload.repo, visibility, '--source', '.', '--remote', 'origin', '--push'], workspace.git_root);
+  return (await git(['remote', 'get-url', 'origin'], workspace.git_root)).stdout.trim();
 }
 async function refreshRunCi(run) {
   if (!run.github_pr_number || !(await githubAuthenticated())) return run;
+  const cwd = run.integration_worktree || workspaceForEntity(run).git_root;
   try {
-    const view = json((await gh(['pr', 'view', String(run.github_pr_number), '--json', 'url,state,mergeStateStatus'])).stdout, {});
+    const view = json((await gh(['pr', 'view', String(run.github_pr_number), '--json', 'url,state,mergeStateStatus'], cwd)).stdout, {});
     let checks = [];
-    try { checks = json((await gh(['pr', 'checks', String(run.github_pr_number), '--json', 'name,state,link,bucket'])).stdout, []); } catch {}
+    try { checks = json((await gh(['pr', 'checks', String(run.github_pr_number), '--json', 'name,state,link,bucket'], cwd)).stdout, []); } catch {}
     const states = checks.map(check => check.state);
     const ciStatus = states.some(value => ['FAILURE', 'ERROR', 'CANCELLED'].includes(value)) ? 'failed' : states.length && states.every(value => ['SUCCESS', 'SKIPPING', 'NEUTRAL'].includes(value)) ? 'passed' : 'pending';
     return updateRun(run.id, { ci_status: ciStatus, ci: { view, checks, checkedAt: now() }, github_pr_url: view.url || run.github_pr_url });
@@ -2142,17 +2170,19 @@ async function refreshRunCi(run) {
 }
 async function publishRun(run, payload = {}) {
   if (run.status !== 'ready_to_publish' && run.status !== 'published') throw new Error('Run is not ready to publish. All tasks must be merged into its integration branch.');
-  await ensureGithubRemote(payload);
-  await git(['push', '--set-upstream', 'origin', run.integration_branch], run.integration_worktree || root);
+  const workspace = workspaceForEntity(run);
+  const cwd = run.integration_worktree || workspace.git_root;
+  await ensureGithubRemote(payload, workspace);
+  await git(['push', '--set-upstream', 'origin', run.integration_branch], cwd);
   let prUrl = run.github_pr_url;
   let prNumber = run.github_pr_number;
   if (!prNumber) {
     try {
-      prUrl = (await gh(['pr', 'create', '--base', run.base_branch, '--head', run.integration_branch, '--title', run.title, '--body', `AOD run ${run.id}\n\n${run.requirement}`], run.integration_worktree || root)).stdout.trim();
+      prUrl = (await gh(['pr', 'create', '--base', run.base_branch, '--head', run.integration_branch, '--title', run.title, '--body', `AOD run ${run.id}\n\n${run.requirement}`], cwd)).stdout.trim();
     } catch {
-      prUrl = (await gh(['pr', 'view', run.integration_branch, '--json', 'url', '--jq', '.url'], run.integration_worktree || root)).stdout.trim();
+      prUrl = (await gh(['pr', 'view', run.integration_branch, '--json', 'url', '--jq', '.url'], cwd)).stdout.trim();
     }
-    const view = json((await gh(['pr', 'view', prUrl, '--json', 'number,url'])).stdout, {});
+    const view = json((await gh(['pr', 'view', prUrl, '--json', 'number,url'], cwd)).stdout, {});
     prNumber = view.number;
     prUrl = view.url || prUrl;
   }
@@ -2172,7 +2202,9 @@ async function directorySize(path) {
 async function healthMetrics() {
   const databaseBytes = await fileSize(databasePath) + await fileSize(`${databasePath}-wal`) + await fileSize(`${databasePath}-shm`);
   const logBytes = await directorySize(handoffDir) + Number(db.prepare('SELECT COALESCE(SUM(LENGTH(message)), 0) AS size FROM task_logs').get().size || 0);
-  return { databaseBytes, logBytes, worktreeBytes: await directorySize(join(dirname(root), `${basename(root)}.aod-worktrees`)), warning: databaseBytes > 200 * 1024 * 1024 || logBytes > 100 * 1024 * 1024 };
+  const worktreeBytes = (await Promise.all(listWorkspaces().map(workspace => directorySize(join(dirname(workspace.git_root), `${basename(workspace.git_root)}.aod-worktrees`, workspace.id)))))
+    .reduce((total, size) => total + size, 0);
+  return { databaseBytes, logBytes, worktreeBytes, warning: databaseBytes > 200 * 1024 * 1024 || logBytes > 100 * 1024 * 1024 };
 }
 async function backupDatabase() {
   const backupDir = join(aodDir, 'backups');
@@ -2192,8 +2224,9 @@ async function cleanupTerminalWorktrees() {
   for (const task of listTasks()) {
     if (!['merged', 'cancelled', 'failed'].includes(task.status) || task.locked || !task.worktree || Date.parse(task.updated_at) > cutoff) continue;
     try {
-      await git(['worktree', 'remove', '--force', task.worktree]);
-      try { await git(['branch', '-D', task.branch]); } catch {}
+      const workspaceRoot = workspaceForEntity(task).git_root;
+      await git(['worktree', 'remove', '--force', task.worktree], workspaceRoot);
+      try { await git(['branch', '-D', task.branch], workspaceRoot); } catch {}
       updateTask(task.id, { worktree: null });
       cleaned.push(task.id);
     } catch (error) { appendEvent('maintenance', `${task.id} cleanup failed: ${error instanceof Error ? error.message : 'unknown error'}`, task.id); }
@@ -2342,10 +2375,11 @@ async function api(request, response, url) {
     if (!agents.includes(planner)) throw new Error('Unsupported planner agent.');
     const createdAt = now();
     const id = `PLAN-${Date.now().toString(36).toUpperCase()}`;
-    const plan = await planWithCodex(payload.requirement.trim(), planner);
-    db.prepare('INSERT INTO plans(id, requirement, planner, dag_json, status, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, payload.requirement.trim(), planner, JSON.stringify(plan), 'ready', null, createdAt, createdAt);
+    const workspace = activeWorkspace();
+    const plan = await planWithCodex(payload.requirement.trim(), planner, workspace.id);
+    db.prepare('INSERT INTO plans(id, requirement, planner, dag_json, status, error, workspace_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, payload.requirement.trim(), planner, JSON.stringify(plan), 'ready', null, workspace.id, createdAt, createdAt);
     appendEvent('plan', `${id} generated by ${planner}`);
-    return send(response, 201, { id, requirement: payload.requirement.trim(), planner, status: 'ready', ...plan });
+    return send(response, 201, { id, requirement: payload.requirement.trim(), planner, status: 'ready', ...plan, ...workspaceIdentity(workspace) });
   }
   if (request.method === 'POST' && url.pathname === '/api/runs') {
     const payload = await body(request);
@@ -2380,7 +2414,8 @@ async function api(request, response, url) {
     if (typeof payload.title !== 'string' || !payload.title.trim()) throw new Error('Task title is required.');
     if (!agents.includes(payload.agent)) throw new Error('Choose a supported agent adapter.');
     const files = cleanPaths(payload.files);
-    const tasks = listTasks();
+    const workspace = activeWorkspace();
+    const tasks = listTasks().filter(task => task.workspace_id === workspace.id);
     assertOwnershipAvailable(tasks, files);
     const id = nextTaskId();
     const task = {
@@ -2388,12 +2423,12 @@ async function api(request, response, url) {
       acceptance: typeof payload.acceptance === 'string' ? payload.acceptance.trim() : '', status: 'draft', branch: `aod/${id.toLowerCase()}-${slug(payload.title)}`,
       worktree: null, run_id: null, base_commit: null, verified_commit: null, verification: null, output: '', process_pid: null,
       attempts: 0, max_retries: Math.max(0, Number(payload.maxRetries || 0)), timeout_ms: Math.max(1000, Number(payload.timeoutMs || 1800000)), locked: false, recovery_note: null, last_exit_code: null,
-      created_at: now(), updated_at: now(), started_at: null, finished_at: null
+      workspace_id: workspace.id, created_at: now(), updated_at: now(), started_at: null, finished_at: null
     };
     validateGraph([...tasks, task]);
-    db.prepare(`INSERT INTO tasks (id, title, agent, files_json, depends_json, acceptance, status, branch, worktree, run_id, base_commit, verified_commit, verification_json, output, process_pid, attempts, max_retries, timeout_ms, locked, recovery_note, last_exit_code, created_at, updated_at, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(task.id, task.title, task.agent, JSON.stringify(task.files), JSON.stringify(task.dependsOn), task.acceptance, task.status, task.branch, task.worktree, null, task.base_commit, task.verified_commit, null, task.output, null, task.attempts, task.max_retries, task.timeout_ms, 0, null, null, task.created_at, task.updated_at, null, null);
+    db.prepare(`INSERT INTO tasks (id, title, agent, files_json, depends_json, acceptance, status, branch, worktree, run_id, base_commit, verified_commit, verification_json, output, process_pid, attempts, max_retries, timeout_ms, locked, recovery_note, last_exit_code, workspace_id, created_at, updated_at, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(task.id, task.title, task.agent, JSON.stringify(task.files), JSON.stringify(task.dependsOn), task.acceptance, task.status, task.branch, task.worktree, null, task.base_commit, task.verified_commit, null, task.output, null, task.attempts, task.max_retries, task.timeout_ms, 0, null, null, task.workspace_id, task.created_at, task.updated_at, null, null);
     appendEvent('task', `${id} created for ${task.agent}`, id);
     await scheduleAdvance();
     return send(response, 201, getTask(id));
