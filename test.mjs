@@ -146,9 +146,9 @@ try {
       args: ['-e', "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1000);console.log(JSON.stringify({title:'Planned run',tasks:[{key:'docs',title:'Create delivery note',agent:'codex',files:['delivery-note.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'none'}]}))"]
     },
     agents: {
-      codex: { command: process.execPath, args: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'], health: { versionArgs: ['--version'], authArgs: ['-e', "console.log('authenticated')"] } },
-      'claude-code': { command: process.execPath, args: ['-e', fakeClaude, '{{worktree}}'], reviewArgs: ['-e', fakeClaude, '{{worktree}}'], timeoutMs: 75 },
-      antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
+      codex: { command: process.execPath, args: ['-e', fakeCodex], discussionArgs: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'], health: { versionArgs: ['--version'], authArgs: ['-e', "console.log('authenticated')"] } },
+      'claude-code': { command: process.execPath, args: ['-e', fakeClaude, '{{worktree}}'], discussionArgs: ['-e', fakeClaude, '{{worktree}}'], reviewArgs: ['-e', fakeClaude, '{{worktree}}'], timeoutMs: 75 },
+      antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], reviewArgs: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
     }
   }));
   daemon = spawn(process.execPath, ['server.mjs'], { cwd: fixture, env: { ...process.env, PORT: String(port) }, windowsHide: true });
@@ -681,6 +681,22 @@ try {
   assert.equal(resumedSynthesis.status, 'awaiting_confirmation');
   assert.equal(resumedSynthesis.turns.filter(turn => turn.phase === 'synthesis').length, 1);
   assert.equal(resumedSynthesis.turns.length, synthesisPausedTurnCount);
+
+  const mutationConfig = structuredClone(originalFixtureConfig);
+  const mutationScript = "const fs=require('fs');if(process.cwd()!==process.env.AOD_WORKSPACE_ROOT)process.exit(17);if(process.env.AOD_GROUP_PHASE==='synthesis'){fs.writeFileSync('discussion-mutation.txt','must remain for operator inspection\\n');const roster=JSON.parse(process.env.AOD_GROUP_ROSTER);const role=r=>roster.find(m=>m.role===r).id;console.log(JSON.stringify({title:'Mutation guard',summary:'Detect writes.',decisions:['Freeze the session.'],disagreements:[],risks:['Unexpected write.'],maxRepairs:2,tasks:[{key:'guard',title:'Guard discussion',description:'Guard discussion.',files:['guard.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'low',executorMemberId:role('executor'),reviewerMemberId:role('reviewer'),fixerMemberId:role('fixer')}]}));}else{console.log('read-only discussion');}";
+  mutationConfig.agents.codex.discussionArgs = ['-e', mutationScript];
+  await writeFile(fixtureConfigPath, JSON.stringify(mutationConfig));
+  let mutationSession;
+  try {
+    mutationSession = await api(`/api/groups/${group.id}/sessions`, { method: 'POST', body: JSON.stringify({ requirement: 'Detect a discussion workspace mutation.' }) });
+    await api(`/api/group-sessions/${mutationSession.id}/start`, { method: 'POST', body: '{}' });
+    const frozenMutationSession = await waitForGroupSessionStatus(mutationSession.id, 'recovery_required');
+    assert.equal(frozenMutationSession.recovery_note.includes('modified'), true);
+  } finally {
+    await writeFile(fixtureConfigPath, JSON.stringify(originalFixtureConfig));
+  }
+  assert.equal(await readFile(join(fixture, 'discussion-mutation.txt'), 'utf8'), 'must remain for operator inspection\n');
+  await rm(join(fixture, 'discussion-mutation.txt'));
 
   const archivedGroup = await api(`/api/groups/${group.id}/archive`, { method: 'POST', body: '{}' });
   assert.equal(archivedGroup.status, 'archived');

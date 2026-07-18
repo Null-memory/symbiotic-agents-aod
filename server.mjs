@@ -9,7 +9,7 @@ import { buildApprovalInbox } from './approval-domain.mjs';
 import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { buildProcessMetrics, classifyInterruptedProcess } from './process-domain.mjs';
-import { requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
+import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
 const aodDir = join(root, '.aod');
@@ -299,6 +299,10 @@ ensureColumn('events', 'run_id', 'TEXT REFERENCES runs(id)');
 for (const table of ['plans', 'runs', 'tasks', 'group_sessions', 'events', 'agent_processes']) {
   ensureColumn(table, 'workspace_id', 'TEXT REFERENCES project_workspaces(id)');
 }
+ensureColumn('group_turns', 'before_head', 'TEXT');
+ensureColumn('group_turns', 'before_status', 'TEXT');
+ensureColumn('group_turns', 'after_head', 'TEXT');
+ensureColumn('group_turns', 'after_status', 'TEXT');
 
 setDefault('run_mode', 'hybrid');
 setDefault('max_concurrency', '3');
@@ -833,6 +837,16 @@ function runShell(command, cwd, timeoutMs) {
 async function git(args, cwd = root, timeoutMs) { return run('git', args, cwd, timeoutMs); }
 async function gitReady(cwd = root) { try { await git(['rev-parse', '--is-inside-work-tree'], cwd); await git(['rev-parse', '--verify', 'HEAD'], cwd); return true; } catch { return false; } }
 async function gitClean(cwd = root) { return (await git(['status', '--porcelain'], cwd)).stdout.trim() === ''; }
+async function repositorySnapshot(cwd) {
+  const [head, status] = await Promise.all([
+    git(['rev-parse', 'HEAD'], cwd),
+    git(['status', '--porcelain', '--untracked-files=all'], cwd),
+  ]);
+  return {
+    head: head.stdout.trim(),
+    status: status.stdout.replace(/\r\n/g, '\n').replace(/\n$/, ''),
+  };
+}
 
 function workspaceError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -1188,9 +1202,14 @@ async function runGroupTurn(session, member, round, phase) {
   try {
     const config = await loadConfig();
     const adapter = config.agents[member.agent];
-    if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No ${member.agent} adapter is configured.`);
+    const argumentTemplate = adapter?.discussionArgs ?? adapter?.reviewArgs;
+    if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(argumentTemplate)) {
+      throw new Error(`No read-only discussionArgs or reviewArgs are configured for ${member.agent}.`);
+    }
     const id = `GT-${crypto.randomUUID().slice(0, 8)}`;
-    const directory = join(dirname(root), `${basename(root)}.aod-group-sessions`, session.id, id);
+    const workspace = workspaceForEntity(session);
+    const workspaceRoot = workspace.git_root;
+    const directory = join(aodDir, 'group-prompts', session.id, id);
     await mkdir(directory, { recursive: true });
     const prompt = groupTurnPrompt(session, member, round, phase);
     const promptFile = join(directory, 'prompt.md');
@@ -1206,12 +1225,22 @@ async function runGroupTurn(session, member, round, phase) {
     for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
       if (!releaseAgentSlot) releaseAgentSlot = await acquireAgentSlot(checkCancelled);
       checkCancelled();
-      const pseudoTask = { id, worktree: directory };
-      const args = adapter.args.map(value => expand(value, pseudoTask, prompt, promptFile));
+      const before = await repositorySnapshot(workspaceRoot);
+      db.prepare('UPDATE group_turns SET before_head = ?, before_status = ? WHERE id = ?').run(before.head, before.status, id);
+      const pseudoTask = { id, worktree: workspaceRoot };
+      const args = argumentTemplate.map(value => expand(value, pseudoTask, prompt, promptFile));
       const outcome = await new Promise(resolveTurn => {
         const child = spawn(adapter.command, args, {
-          cwd: directory, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...process.env, AOD_GROUP_SESSION_ID: session.id, AOD_GROUP_MEMBER_ID: member.id, AOD_GROUP_PHASE: phase, AOD_GROUP_ROSTER: JSON.stringify(session.members) }
+          cwd: workspaceRoot, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            AOD_GROUP_SESSION_ID: session.id,
+            AOD_GROUP_MEMBER_ID: member.id,
+            AOD_GROUP_PHASE: phase,
+            AOD_GROUP_REQUIREMENT: session.requirement,
+            AOD_GROUP_ROSTER: JSON.stringify(session.members),
+            AOD_WORKSPACE_ROOT: workspaceRoot,
+          }
         });
         let output = '';
         let settled = false;
@@ -1219,7 +1248,7 @@ async function runGroupTurn(session, member, round, phase) {
         const processId = startAgentProcessRecord({
           kind: 'group_turn', entityId: id, runId: session.run_id, sessionId: session.id, agent: member.agent,
           child, command: adapter.command, args, timeoutMs, attempt,
-          metadata: { memberId: member.id, round, phase }
+          metadata: { memberId: member.id, round, phase, workspaceRoot }
         });
         const finish = result => {
           if (settled) return;
@@ -1232,7 +1261,7 @@ async function runGroupTurn(session, member, round, phase) {
             exitCode: result.code,
             reason: result.ok ? null : result.error?.message || `Group turn exited with ${result.code}.`
           });
-          resolveTurn({ ...result, output });
+          resolveTurn({ ...result, output, processId });
         };
         const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
         groupProcesses.set(id, { child, timer, sessionId: session.id, processId });
@@ -1246,6 +1275,21 @@ async function runGroupTurn(session, member, round, phase) {
         child.once('error', error => finish({ ok: false, error, code: null }));
         child.once('close', code => finish({ ok: !timedOut && code === 0, code, error: timedOut ? new Error(`Group turn timed out after ${timeoutMs}ms.`) : null }));
       });
+      let after = null;
+      try { after = await repositorySnapshot(workspaceRoot); } catch {}
+      db.prepare('UPDATE group_turns SET after_head = ?, after_status = ? WHERE id = ?')
+        .run(after?.head || null, after?.status ?? null, id);
+      if (didRepositorySnapshotChange(before, after)) {
+        const note = `Discussion turn ${id} modified the bound workspace. Inspect ${workspaceRoot} before recovery.`;
+        db.prepare("UPDATE group_turns SET status = 'recovery_required', output = ?, process_pid = NULL, finished_at = ? WHERE id = ?")
+          .run(note, now(), id);
+        db.prepare("UPDATE agent_processes SET status = 'failed', terminal_reason = ? WHERE id = ?")
+          .run(note, outcome.processId);
+        updateGroupSession(session.id, { status: 'recovery_required', recovery_note: note });
+        appendEvent('group_workspace_change', note, null, session.run_id || null);
+        broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'recovery_required' });
+        throw workspaceError('GROUP_DISCUSSION_MODIFIED_WORKSPACE', note);
+      }
       if (outcome.ok) {
         const output = redactSecrets(outcome.output).slice(-12000).trim();
         db.prepare("UPDATE group_turns SET status = 'completed', output = ?, process_pid = NULL, exit_code = ?, finished_at = ? WHERE id = ?")
