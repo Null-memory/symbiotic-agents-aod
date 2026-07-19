@@ -1,4 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 import type { MobileConnection, MobilePairingPayload, MobileState } from './types';
 
 const CONNECTION_KEY = 'aod.mobile.connection.v1';
@@ -29,16 +30,27 @@ export function parsePairingPayload(raw: string): MobilePairingPayload {
 }
 
 export async function saveConnection(connection: MobileConnection) {
-  await SecureStore.setItemAsync(CONNECTION_KEY, JSON.stringify(connection));
+  const value = JSON.stringify(connection);
+  if (Platform.OS === 'web') {
+    globalThis.localStorage?.setItem(CONNECTION_KEY, value);
+    return;
+  }
+  await SecureStore.setItemAsync(CONNECTION_KEY, value);
 }
 
 export async function loadConnection(): Promise<MobileConnection | null> {
-  const raw = await SecureStore.getItemAsync(CONNECTION_KEY);
+  const raw = Platform.OS === 'web'
+    ? globalThis.localStorage?.getItem(CONNECTION_KEY) || null
+    : await SecureStore.getItemAsync(CONNECTION_KEY);
   if (!raw) return null;
   try { return JSON.parse(raw) as MobileConnection; } catch { return null; }
 }
 
 export async function clearConnection() {
+  if (Platform.OS === 'web') {
+    globalThis.localStorage?.removeItem(CONNECTION_KEY);
+    return;
+  }
   await SecureStore.deleteItemAsync(CONNECTION_KEY);
 }
 
