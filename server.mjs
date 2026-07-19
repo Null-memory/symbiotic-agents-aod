@@ -10,7 +10,7 @@ import { buildApprovalInbox } from './approval-domain.mjs';
 import { agentProfileCatalog, buildAgentInvocation, freezeAgentProfile } from './agent-profile-domain.mjs';
 import { acceptanceCommandGuidance, buildBoundedGroupContext, completedGroupTurnMemberIds, groupPhaseResponseGuidance, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
-import { buildMobilePairingPayload, generateMobileToken, generatePairingCode, hashMobileSecret, isLoopbackAddress, parseBearerToken } from './mobile-auth-domain.mjs';
+import { generateMobileToken, hashMobilePassword, hashMobileSecret, isLoopbackAddress, parseBearerToken, validateMobileCredentials, verifyMobilePassword } from './mobile-auth-domain.mjs';
 import { nativeFolderPickerSupported, parseNativeFolderPickerOutput, windowsFolderPickerInvocation } from './native-folder-picker-domain.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
@@ -28,8 +28,6 @@ const appVersion = (() => {
 const bindHost = String(process.env.AOD_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
 const mobileEnabled = /^(1|true|yes|on)$/i.test(String(process.env.AOD_MOBILE_ENABLED || ''));
 const mobilePublicUrlOverride = String(process.env.AOD_PUBLIC_URL || '').trim().replace(/\/$/, '');
-const mobilePairingTtlMs = 5 * 60 * 1000;
-const qrCodeModule = await import('qrcode').catch(() => null);
 const agents = ['codex', 'claude-code', 'antigravity'];
 const statuses = ['draft', 'preparing', 'ready', 'running', 'verifying', 'reviewing', 'repairing', 'merge_ready', 'merging', 'conflict_review', 'recovery_required', 'failed', 'cancelled', 'merged'];
 const transitions = {
@@ -344,6 +342,13 @@ db.exec(`
     revoked_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_mobile_devices_active ON mobile_devices(revoked_at, last_seen_at);
+  CREATE TABLE IF NOT EXISTS mobile_accounts (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
 migrateAgentGroupMembers(db);
 
@@ -402,10 +407,11 @@ function mobileStatus() {
   const localOnly = /^127\.|^localhost$|^::1$/.test(bindHost);
   return {
     enabled: mobileEnabled,
+    authMode: 'password',
+    accountConfigured: Boolean(db.prepare('SELECT 1 FROM mobile_accounts LIMIT 1').get()),
     bindHost,
     publicUrl,
     reachable: mobileEnabled && !localOnly && Boolean(publicUrl),
-    pairingTtlMs: mobilePairingTtlMs,
   };
 }
 
@@ -420,7 +426,7 @@ function mobileDeviceForToken(token) {
 
 function mobileRequestIsPublic(request, url) {
   return (request.method === 'GET' && (url.pathname === '/api/health' || url.pathname === '/api/mobile/status'))
-    || (request.method === 'POST' && url.pathname === '/api/mobile/pairing/complete');
+    || (request.method === 'POST' && url.pathname === '/api/mobile/login');
 }
 
 function authorizeRequest(request, url) {
@@ -435,60 +441,48 @@ function authorizeRequest(request, url) {
   return { local: false, device };
 }
 
-function cleanupExpiredMobilePairings() {
-  db.prepare('DELETE FROM mobile_pairings WHERE expires_at <= ? OR consumed_at IS NOT NULL').run(now());
-}
-
 function requireMobileEnabled() {
   if (!mobileEnabled) throw httpError('MOBILE_DISABLED', 409, 'Mobile access is disabled. Set AOD_MOBILE_ENABLED=1 and restart AOD.');
 }
 
-async function createMobilePairing() {
-  requireMobileEnabled();
-  const baseUrl = mobilePublicUrl();
-  if (!baseUrl || /^127\.|^localhost$|^::1$/.test(bindHost)) {
-    throw httpError('MOBILE_PUBLIC_URL_REQUIRED', 409, 'Set AOD_PUBLIC_URL to a reachable Tailscale URL and bind AOD to a non-loopback host before pairing.');
-  }
-  cleanupExpiredMobilePairings();
-  const code = generatePairingCode();
-  const expiresAt = new Date(Date.now() + mobilePairingTtlMs).toISOString();
-  const id = `MP-${crypto.randomUUID()}`;
-  db.prepare('INSERT INTO mobile_pairings(id, code_hash, base_url, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(id, hashMobileSecret(code), baseUrl, expiresAt, now());
-  const qrPayload = buildMobilePairingPayload({ baseUrl, code, expiresAt });
-  const qrDataUrl = qrCodeModule?.default?.toDataURL
-    ? await qrCodeModule.default.toDataURL(qrPayload, { errorCorrectionLevel: 'M', margin: 1, width: 280 })
-    : null;
-  return { id, code, expiresAt, url: baseUrl, qrPayload, qrDataUrl };
+function mobileAccountSummary() {
+  const account = db.prepare('SELECT username, created_at, updated_at FROM mobile_accounts LIMIT 1').get();
+  return account ? { configured: true, ...account } : { configured: false, username: null, created_at: null, updated_at: null };
 }
 
-function completeMobilePairing(payload) {
+function saveMobileAccount(payload) {
+  const credentials = validateMobileCredentials(payload);
+  const existing = db.prepare('SELECT id, created_at FROM mobile_accounts LIMIT 1').get();
+  const createdAt = existing?.created_at || now();
+  const updatedAt = now();
+  db.prepare(`INSERT INTO mobile_accounts(id, username, password_hash, created_at, updated_at)
+    VALUES ('MA-001', ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET username = excluded.username, password_hash = excluded.password_hash, updated_at = excluded.updated_at`)
+    .run(credentials.username, hashMobilePassword(credentials.password), createdAt, updatedAt);
+  return mobileAccountSummary();
+}
+
+function issueMobileDevice(deviceName) {
+  const normalizedName = String(deviceName || 'Android device').trim().slice(0, 80) || 'Android device';
+  const deviceId = `MD-${crypto.randomUUID()}`;
+  const token = generateMobileToken();
+  const createdAt = now();
+  db.prepare('INSERT INTO mobile_devices(id, name, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)')
+    .run(deviceId, normalizedName, hashMobileSecret(token), createdAt, createdAt);
+  return { deviceId, deviceName: normalizedName, token, url: mobilePublicUrl() };
+}
+
+function loginMobile(payload) {
   requireMobileEnabled();
-  const code = String(payload?.code || '').trim().toUpperCase();
-  if (!code) throw httpError('MOBILE_PAIRING_CODE_REQUIRED', 400, 'A pairing code is required.');
-  cleanupExpiredMobilePairings();
-  let transactionStarted = false;
-  try {
-    db.exec('BEGIN IMMEDIATE');
-    transactionStarted = true;
-    const pairing = db.prepare('SELECT * FROM mobile_pairings WHERE code_hash = ? AND consumed_at IS NULL AND expires_at > ?')
-      .get(hashMobileSecret(code), now());
-    if (!pairing) throw httpError('MOBILE_PAIRING_INVALID', 401, 'The pairing code is invalid or expired.');
-    const deviceName = String(payload?.deviceName || 'Android device').trim().slice(0, 80) || 'Android device';
-    const deviceId = `MD-${crypto.randomUUID()}`;
-    const token = generateMobileToken();
-    const createdAt = now();
-    const consumed = db.prepare('UPDATE mobile_pairings SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(createdAt, pairing.id);
-    if (!consumed.changes) throw httpError('MOBILE_PAIRING_INVALID', 401, 'The pairing code is invalid or expired.');
-    db.prepare('INSERT INTO mobile_devices(id, name, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)')
-      .run(deviceId, deviceName, hashMobileSecret(token), createdAt, createdAt);
-    db.exec('COMMIT');
-    transactionStarted = false;
-    return { deviceId, deviceName, token, url: pairing.base_url };
-  } catch (error) {
-    if (transactionStarted) db.exec('ROLLBACK');
-    throw error;
+  let credentials;
+  try { credentials = validateMobileCredentials(payload); } catch {
+    throw httpError('MOBILE_LOGIN_INVALID', 401, 'Username or password is invalid.');
   }
+  const account = db.prepare('SELECT * FROM mobile_accounts WHERE username = ?').get(credentials.username);
+  if (!account || !verifyMobilePassword(credentials.password, account.password_hash)) {
+    throw httpError('MOBILE_LOGIN_INVALID', 401, 'Username or password is invalid.');
+  }
+  return issueMobileDevice(payload?.deviceName);
 }
 
 function listMobileDevices() {
@@ -2826,11 +2820,15 @@ async function body(request) { let data = ''; for await (const chunk of request)
 async function api(request, response, url) {
   request.mobileContext = authorizeRequest(request, url);
   if (request.method === 'GET' && url.pathname === '/api/mobile/status') return send(response, 200, mobileStatus());
-  if (request.method === 'POST' && url.pathname === '/api/mobile/pairing/start') {
-    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Pairing must be started from the local desktop console.');
-    return send(response, 200, await createMobilePairing());
+  if (request.method === 'GET' && url.pathname === '/api/mobile/account') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Mobile account management is available from the local desktop console.');
+    return send(response, 200, mobileAccountSummary());
   }
-  if (request.method === 'POST' && url.pathname === '/api/mobile/pairing/complete') return send(response, 200, completeMobilePairing(await body(request)));
+  if (request.method === 'POST' && url.pathname === '/api/mobile/account') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Mobile account management is available from the local desktop console.');
+    return send(response, 200, saveMobileAccount(await body(request)));
+  }
+  if (request.method === 'POST' && url.pathname === '/api/mobile/login') return send(response, 200, loginMobile(await body(request)));
   if (request.method === 'GET' && url.pathname === '/api/mobile/devices') {
     if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Device management is available from the local desktop console.');
     return send(response, 200, { devices: listMobileDevices() });

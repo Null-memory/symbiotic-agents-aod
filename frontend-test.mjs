@@ -47,7 +47,7 @@ for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCo
   assert.equal(html.includes(`id="${id}"`), true, `Adaptive workbench is missing #${id}.`);
 }
 assert.equal(html.includes('id="taskStreamTools"'), true, 'Task output must reserve a surface for expandable tool events.');
-for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'pickWorkspaceDirectory', 'validateWorkspace', 'selectWorkspace', 'openMobileConnection', 'mobileConnectionDialog', 'mobilePairingQr', 'startMobilePairing', 'mobileDeviceList']) {
+for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'pickWorkspaceDirectory', 'validateWorkspace', 'selectWorkspace', 'openMobileConnection', 'mobileConnectionDialog', 'mobileAccountForm', 'mobileAccountUsername', 'mobileAccountPassword', 'saveMobileAccount', 'mobileDeviceList']) {
   assert.equal(html.includes(`id="${id}"`), true, `Workspace selection is missing #${id}.`);
 }
 assert.equal(script.includes('createWorkspaceController'), true, 'The app must initialize the workspace controller.');
@@ -57,14 +57,15 @@ for (const endpoint of ['/api/workspaces', '/api/workspaces/validate', '/api/fil
 assert.equal(workspaceModule.includes('/select'), true, 'Workspace UI must select a validated registered project.');
 assert.equal(workspaceModule.includes('等待 Windows 窗口'), true, 'Workspace UI must expose the native Windows picker pending state.');
 assert.equal(server.includes('/api/filesystem/pick-directory'), true, 'Server must expose the native Windows folder picker endpoint.');
-for (const endpoint of ['/api/mobile/status', '/api/mobile/pairing/start', '/api/mobile/pairing/complete', '/api/mobile/devices']) {
+for (const endpoint of ['/api/mobile/status', '/api/mobile/account', '/api/mobile/login', '/api/mobile/devices']) {
   assert.equal(server.includes(endpoint), true, `Server is missing mobile endpoint ${endpoint}.`);
 }
-assert.equal(server.includes('mobile_pairings'), true, 'Server must persist mobile pairing sessions.');
+assert.equal(server.includes('mobile_accounts'), true, 'Server must persist mobile account password hashes.');
 assert.equal(server.includes('mobile_devices'), true, 'Server must persist mobile device tokens.');
 assert.equal(server.includes('AOD_BIND_HOST'), true, 'Server must expose configurable mobile binding.');
 assert.match(server, /taskMatch && request\.method === 'GET' && !taskMatch\[2\]/, 'Mobile detail views need a GET task endpoint.');
-assert.equal(script.includes('startMobilePairing'), true, 'Desktop console must start mobile pairing.');
+assert.equal(script.includes('saveMobileAccount'), true, 'Desktop console must save the mobile account.');
+assert.equal(html.includes('mobilePairingQr'), false, 'Desktop console must not expose QR pairing controls.');
 assert.equal(script.includes('workspace-badge'), true, 'Entity views must expose bound workspace badges.');
 for (const tab of ['discussion', 'task', 'acceptance']) {
   assert.equal(html.includes(`data-context-tab="${tab}"`), true, `Context dock is missing the ${tab} tab.`);

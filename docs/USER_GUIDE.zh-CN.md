@@ -232,7 +232,7 @@ $env:AOD_PUBLIC_URL = "http://100.x.x.x:4821"
 npm start
 ```
 
-将 `100.x.x.x` 替换为 Windows 的 Tailscale IPv4 地址，并在 Windows 防火墙中允许端口。桌面端顶栏的“手机连接”会生成有效期 5 分钟的一次性二维码；Android App 扫码后保存设备令牌。设备可以在桌面端撤销，GitHub CLI 登录和设备授权仍在桌面端完成。
+将 `100.x.x.x` 替换为 Windows 的 Tailscale IPv4 地址，并在 Windows 防火墙中允许端口。桌面端顶栏的“手机连接”中先设置移动账号，Android App 输入 AOD 地址、用户名、密码和设备名称登录。服务端只保存密码哈希，登录成功后手机保存独立设备令牌；设备可以在桌面端撤销，GitHub CLI 登录和设备授权仍在桌面端完成。
 
 开发移动端：
 

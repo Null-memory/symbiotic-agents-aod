@@ -745,16 +745,16 @@ async function refresh({ includeGithub = true } = {}) {
 
 function renderMobileConnectionStatus(status) {
   const panel = $('#mobileConnectionStatus');
-  const button = $('#startMobilePairing');
+  const button = $('#saveMobileAccount');
   if (!panel || !button) return;
   const state = status.reachable ? 'READY' : status.enabled ? 'CHECK CONFIG' : 'DISABLED';
   const message = status.reachable
-    ? `手机可通过 Tailscale 连接 ${status.publicUrl}。请确保 Windows 防火墙允许 AOD 端口。`
+    ? `手机可通过 Tailscale 连接 ${status.publicUrl}，使用下方账号密码登录。请确保 Windows 防火墙允许 AOD 端口。`
     : status.enabled
       ? '移动模式已开启，但没有可访问的 Tailscale 地址；请配置 AOD_PUBLIC_URL，并使用非 loopback 监听地址。'
-      : '移动连接默认关闭。设置 AOD_MOBILE_ENABLED=1、AOD_BIND_HOST 和 AOD_PUBLIC_URL 后重启服务。';
+      : '移动连接默认关闭。设置 AOD_MOBILE_ENABLED=1、AOD_BIND_HOST 和 AOD_PUBLIC_URL 后重启服务；账号可以先在这里设置。';
   panel.innerHTML = `<span class="status-pill ${status.reachable ? '' : 'warning'}">${state}</span><p>${escapeHtml(message)}</p>`;
-  button.disabled = !status.reachable;
+  button.disabled = false;
 }
 
 function renderMobileDevices(devices) {
@@ -766,41 +766,35 @@ function renderMobileDevices(devices) {
 
 async function refreshMobileConnection() {
   try {
-    const [status, deviceResult] = await Promise.all([request('/api/mobile/status'), request('/api/mobile/devices')]);
+    const [status, account, deviceResult] = await Promise.all([request('/api/mobile/status'), request('/api/mobile/account'), request('/api/mobile/devices')]);
     renderMobileConnectionStatus(status);
+    $('#mobileAccountUsername').value = account.username || '';
+    $('#mobileAccountPassword').value = '';
+    $('#mobileAccountMessage').textContent = account.configured ? `已设置账号：${account.username}` : '尚未设置账号。';
     renderMobileDevices(deviceResult.devices || []);
   } catch (error) {
     $('#mobileConnectionStatus').innerHTML = `<span class="status-pill warning">ERROR</span><p>${escapeHtml(error.message)}</p>`;
-    $('#startMobilePairing').disabled = true;
+    $('#saveMobileAccount').disabled = false;
   }
 }
 
-async function startMobilePairing() {
-  const button = $('#startMobilePairing');
+async function saveMobileAccount(event) {
+  event.preventDefault();
+  const button = $('#saveMobileAccount');
   button.disabled = true;
-  button.textContent = '生成中…';
+  button.textContent = '保存中…';
   try {
-    const pairing = await request('/api/mobile/pairing/start', { method: 'POST', body: '{}' });
-    const image = $('#mobilePairingQr');
-    if (pairing.qrDataUrl) {
-      image.src = pairing.qrDataUrl;
-      image.hidden = false;
-      $('#mobilePairingQrEmpty').hidden = true;
-    } else {
-      image.hidden = true;
-      $('#mobilePairingQrEmpty').hidden = false;
-      $('#mobilePairingQrEmpty').textContent = '当前运行环境未安装二维码生成器，请使用右侧地址和配对码手动连接。';
-    }
-    $('#mobilePairingUrl').textContent = pairing.url;
-    $('#mobilePairingCode').textContent = pairing.code;
-    $('#mobilePairingExpiry').textContent = new Date(pairing.expiresAt).toLocaleTimeString('zh-CN');
-    $('#copyMobilePairing').disabled = false;
-    tell('手机配对二维码已生成，5 分钟内有效。');
+    const username = $('#mobileAccountUsername').value.trim();
+    const password = $('#mobileAccountPassword').value;
+    await request('/api/mobile/account', { method: 'POST', body: JSON.stringify({ username, password }) });
+    $('#mobileAccountPassword').value = '';
+    $('#mobileAccountMessage').textContent = `账号 ${username} 已保存。`;
+    tell('移动账号已保存。');
   } catch (error) {
     tell(error.message, 'error');
   } finally {
     button.disabled = false;
-    button.textContent = '生成二维码';
+    button.textContent = '保存账号';
   }
 }
 
@@ -810,13 +804,8 @@ $('#openMobileConnection').addEventListener('click', async () => {
 });
 $('#closeMobileConnection').addEventListener('click', () => $('#mobileConnectionDialog').close());
 $('#cancelMobileConnection').addEventListener('click', () => $('#mobileConnectionDialog').close());
-$('#startMobilePairing').addEventListener('click', startMobilePairing);
+$('#mobileAccountForm').addEventListener('submit', saveMobileAccount);
 $('#refreshMobileDevices').addEventListener('click', refreshMobileConnection);
-$('#copyMobilePairing').addEventListener('click', async () => {
-  const text = `AOD 地址：${$('#mobilePairingUrl').textContent}\n配对码：${$('#mobilePairingCode').textContent}`;
-  try { await navigator.clipboard.writeText(text); tell('手机连接信息已复制。'); }
-  catch { tell(text); }
-});
 $('#mobileDeviceList').addEventListener('click', async event => {
   const button = event.target.closest('[data-revoke-mobile-device]');
   if (!button || !confirm(`确认撤销设备 ${button.dataset.revokeMobileDevice}？`)) return;

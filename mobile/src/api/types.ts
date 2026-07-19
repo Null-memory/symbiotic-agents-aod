@@ -1,11 +1,3 @@
-export type MobilePairingPayload = {
-  type: 'aod-mobile-pairing';
-  version: 1;
-  url: string;
-  code: string;
-  expiresAt: string;
-};
-
 export type MobileConnection = {
   baseUrl: string;
   token: string;

@@ -180,9 +180,14 @@
     <dialog class="mobile-dialog" id="mobileConnectionDialog" aria-labelledby="mobileConnectionDialogTitle">
       <div class="dialog-head"><div><p class="kicker">ANDROID COMPANION</p><h2 id="mobileConnectionDialogTitle">手机连接</h2></div><button class="icon-button" id="closeMobileConnection" type="button" aria-label="关闭">×</button></div>
       <div class="mobile-connection-status" id="mobileConnectionStatus"><span class="status-pill">检查中</span><p>正在读取移动连接配置。</p></div>
-      <section class="mobile-pairing-panel">
-        <div class="section-head"><div><p class="kicker">ONE-TIME PAIRING</p><h3>生成手机配对码</h3></div><button class="primary compact" id="startMobilePairing" type="button">生成二维码</button></div>
-        <div class="mobile-pairing-grid"><div class="mobile-qr-frame"><img id="mobilePairingQr" alt="手机配对二维码" hidden /><p id="mobilePairingQrEmpty">启用移动连接后，在这里生成一次性二维码。</p></div><div class="mobile-pairing-copy"><p id="mobilePairingHint">二维码有效期 5 分钟，只能使用一次。</p><dl><div><dt>地址</dt><dd id="mobilePairingUrl">未生成</dd></div><div><dt>配对码</dt><dd id="mobilePairingCode">未生成</dd></div><div><dt>过期时间</dt><dd id="mobilePairingExpiry">未生成</dd></div></dl><button class="secondary compact" id="copyMobilePairing" type="button" disabled>复制连接信息</button></div></div>
+      <section class="mobile-account-panel">
+        <div class="section-head"><div><p class="kicker">PASSWORD LOGIN</p><h3>设置移动账号</h3></div><span class="status-pill">本机设置</span></div>
+        <p class="mobile-account-hint">Android 端使用这里的账号密码登录。服务端只保存密码哈希，登录后手机会获得可撤销的设备会话。</p>
+        <form id="mobileAccountForm" class="mobile-account-form">
+          <label>用户名<input id="mobileAccountUsername" name="username" required minlength="3" maxlength="64" autocomplete="username" placeholder="例如 aod.admin" /></label>
+          <label>密码<input id="mobileAccountPassword" name="password" required minlength="8" maxlength="256" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label>
+          <div class="dialog-actions"><span id="mobileAccountMessage" class="mobile-account-message">尚未设置账号。</span><button class="primary compact" id="saveMobileAccount" type="submit">保存账号</button></div>
+        </form>
       </section>
       <section class="mobile-devices-panel"><div class="section-head"><div><p class="kicker">PAIRED DEVICES</p><h3>已授权设备</h3></div></div><div id="mobileDeviceList" class="mobile-device-list"><p class="empty">暂无已授权设备。</p></div></section>
       <div class="dialog-actions"><button class="secondary" id="refreshMobileDevices" type="button">刷新设备</button><button class="secondary" id="cancelMobileConnection" type="button">关闭</button></div>

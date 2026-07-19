@@ -197,10 +197,11 @@ try {
   assert.equal(mobileStatus.enabled, true);
   assert.equal(mobileStatus.reachable, true);
   assert.equal(mobileStatus.publicUrl, `http://100.64.0.4:${port}`);
-  const pairing = await api('/api/mobile/pairing/start', { method: 'POST', body: '{}' });
-  assert.match(pairing.code, /^AOD-/);
-  assert.equal(JSON.parse(pairing.qrPayload).code, pairing.code);
-  assert.equal('token' in JSON.parse(pairing.qrPayload), false);
+  assert.equal(mobileStatus.authMode, 'password');
+  assert.equal(mobileStatus.accountConfigured, false);
+  const account = await api('/api/mobile/account', { method: 'POST', body: JSON.stringify({ username: ' AOD.Admin ', password: 'a-secure-pass' }) });
+  assert.deepEqual(account, { configured: true, username: 'aod.admin', created_at: account.created_at, updated_at: account.updated_at });
+  assert.equal((await api('/api/mobile/account')).username, 'aod.admin');
   if (remoteHost) {
     const remoteHealth = await remoteApi('/api/health');
     assert.deepEqual(Object.keys(remoteHealth).sort(), ['mobile', 'ok', 'version']);
@@ -211,7 +212,9 @@ try {
     assert.equal(remoteHealth.mobile.reachable, true);
     const unauthorized = await remoteApiFailure('/api/state');
     assert.equal(unauthorized.code, 'MOBILE_AUTH_REQUIRED');
-    const paired = await remoteApi('/api/mobile/pairing/complete', { method: 'POST', body: JSON.stringify({ code: pairing.code, deviceName: 'Test Android' }) });
+    const invalidLogin = await remoteApiFailure('/api/mobile/login', { method: 'POST', body: JSON.stringify({ username: 'aod.admin', password: 'wrong-pass', deviceName: 'Test Android' }) });
+    assert.equal(invalidLogin.code, 'MOBILE_LOGIN_INVALID');
+    const paired = await remoteApi('/api/mobile/login', { method: 'POST', body: JSON.stringify({ username: 'aod.admin', password: 'a-secure-pass', deviceName: 'Test Android' }) });
     assert.equal(paired.deviceName, 'Test Android');
     assert.equal(paired.token.length >= 40, true);
     const authorizedState = await remoteApi('/api/state', { headers: { authorization: `Bearer ${paired.token}` } });
@@ -221,7 +224,6 @@ try {
     await api(`/api/mobile/devices/${paired.deviceId}/revoke`, { method: 'POST', body: '{}' });
     const revoked = await remoteApiFailure('/api/state', { headers: { authorization: `Bearer ${paired.token}` } });
     assert.equal(revoked.code, 'MOBILE_AUTH_INVALID');
-    assert.equal((await remoteApiFailure('/api/mobile/pairing/complete', { method: 'POST', body: JSON.stringify({ code: pairing.code, deviceName: 'Replay' }) })).code, 'MOBILE_PAIRING_INVALID');
   }
   assert.equal((await apiFailure('/api/workspaces/validate', { method: 'POST', body: JSON.stringify({ path: 'relative-project' }) })).code, 'WORKSPACE_PATH_NOT_ABSOLUTE');
   const browsedDirectories = await api(`/api/filesystem/directories?path=${encodeURIComponent(fixture)}`);

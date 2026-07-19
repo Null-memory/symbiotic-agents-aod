@@ -2,21 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  buildMobilePairingPayload,
   generateMobileToken,
-  generatePairingCode,
   hashMobileSecret,
   isLoopbackAddress,
+  hashMobilePassword,
+  normalizeMobileUsername,
   parseBearerToken,
+  validateMobileCredentials,
+  verifyMobilePassword,
 } from './mobile-auth-domain.mjs';
 
-test('generates a readable pairing code and a cryptographically separate device token', () => {
-  const bytes = Buffer.from('0123456789abcdef', 'hex');
-  const code = generatePairingCode(() => bytes);
+test('generates a cryptographically separate mobile device token', () => {
   const token = generateMobileToken(() => Buffer.alloc(32, 7));
-  assert.match(code, /^[A-Z0-9-]{11,}$/);
   assert.equal(token.length >= 40, true);
-  assert.notEqual(code, token);
 });
 
 test('hashes mobile secrets without persisting the raw value', () => {
@@ -43,14 +41,18 @@ test('recognizes IPv4 and IPv6 loopback clients', () => {
   assert.equal(isLoopbackAddress('100.64.0.4'), false);
 });
 
-test('builds a versioned QR pairing payload without including the device token', () => {
-  const payload = JSON.parse(buildMobilePairingPayload({ baseUrl: 'http://100.64.0.4:4826', code: 'AOD-ABCD-EFGH', expiresAt: '2030-01-01T00:00:00.000Z' }));
-  assert.deepEqual(payload, {
-    type: 'aod-mobile-pairing',
-    version: 1,
-    url: 'http://100.64.0.4:4826',
-    code: 'AOD-ABCD-EFGH',
-    expiresAt: '2030-01-01T00:00:00.000Z',
-  });
-  assert.equal('token' in payload, false);
+test('normalizes usernames and validates password length', () => {
+  assert.equal(normalizeMobileUsername('  Admin.User  '), 'admin.user');
+  assert.throws(() => normalizeMobileUsername('a'), /username/i);
+  assert.throws(() => validateMobileCredentials({ username: 'admin', password: 'short' }), /password/i);
+  assert.deepEqual(validateMobileCredentials({ username: 'Admin', password: 'a-secure-pass' }), { username: 'admin', password: 'a-secure-pass' });
+});
+
+test('hashes and verifies account passwords without storing the raw password', () => {
+  const encoded = hashMobilePassword('a-secure-pass', () => Buffer.alloc(16, 7));
+  assert.match(encoded, /^scrypt\$[a-f0-9]{32}\$[a-f0-9]{128}$/);
+  assert.notEqual(encoded, 'a-secure-pass');
+  assert.equal(verifyMobilePassword('a-secure-pass', encoded), true);
+  assert.equal(verifyMobilePassword('wrong-pass', encoded), false);
+  assert.equal(verifyMobilePassword('a-secure-pass', 'broken-hash'), false);
 });
