@@ -47,14 +47,16 @@ for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCo
   assert.equal(html.includes(`id="${id}"`), true, `Adaptive workbench is missing #${id}.`);
 }
 assert.equal(html.includes('id="taskStreamTools"'), true, 'Task output must reserve a surface for expandable tool events.');
-for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'validateWorkspace', 'selectWorkspace']) {
+for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'pickWorkspaceDirectory', 'validateWorkspace', 'selectWorkspace']) {
   assert.equal(html.includes(`id="${id}"`), true, `Workspace selection is missing #${id}.`);
 }
 assert.equal(script.includes('createWorkspaceController'), true, 'The app must initialize the workspace controller.');
-for (const endpoint of ['/api/workspaces', '/api/workspaces/validate', '/api/filesystem/directories']) {
+for (const endpoint of ['/api/workspaces', '/api/workspaces/validate', '/api/filesystem/directories', '/api/filesystem/pick-directory']) {
   assert.equal(workspaceModule.includes(endpoint), true, `Workspace UI is missing ${endpoint}.`);
 }
 assert.equal(workspaceModule.includes('/select'), true, 'Workspace UI must select a validated registered project.');
+assert.equal(workspaceModule.includes('等待 Windows 窗口'), true, 'Workspace UI must expose the native Windows picker pending state.');
+assert.equal(server.includes('/api/filesystem/pick-directory'), true, 'Server must expose the native Windows folder picker endpoint.');
 assert.equal(script.includes('workspace-badge'), true, 'Entity views must expose bound workspace badges.');
 for (const tab of ['discussion', 'task', 'acceptance']) {
   assert.equal(html.includes(`data-context-tab="${tab}"`), true, `Context dock is missing the ${tab} tab.`);

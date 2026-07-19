@@ -9,6 +9,7 @@ import { buildApprovalInbox } from './approval-domain.mjs';
 import { agentProfileCatalog, buildAgentInvocation, freezeAgentProfile } from './agent-profile-domain.mjs';
 import { acceptanceCommandGuidance, buildBoundedGroupContext, completedGroupTurnMemberIds, groupPhaseResponseGuidance, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
+import { nativeFolderPickerSupported, parseNativeFolderPickerOutput, windowsFolderPickerInvocation } from './native-folder-picker-domain.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
@@ -52,9 +53,11 @@ let streamEventId = 0;
 let pendingAgentStarts = 0;
 let githubLogin = null;
 let advanceQueue = Promise.resolve();
+let nativeFolderPickerPromise = null;
 const daemonLeaseOwner = crypto.randomUUID();
 const processHeartbeatMs = Math.max(250, Number(process.env.AOD_PROCESS_HEARTBEAT_MS || 5000));
 const processLeaseMs = Math.max(processHeartbeatMs * 2, Number(process.env.AOD_PROCESS_LEASE_MS || 15000));
+const nativeFolderPickerTimeoutMs = Math.max(30000, Number(process.env.AOD_NATIVE_PICKER_TIMEOUT_MS || 10 * 60 * 1000));
 
 mkdirSync(aodDir, { recursive: true });
 const db = new DatabaseSync(databasePath);
@@ -1218,6 +1221,60 @@ async function browseDirectories(value) {
     directories: entries.filter(entry => entry.isDirectory()).map(entry => ({ name: entry.name, path: join(directory, entry.name) }))
       .sort((left, right) => left.name.localeCompare(right.name)),
   };
+}
+
+async function pickNativeFolder(initialPath = '') {
+  if (!nativeFolderPickerSupported()) {
+    throw workspaceError('WORKSPACE_NATIVE_PICKER_UNAVAILABLE', 'The Windows folder picker is only available when AOD runs on Windows.');
+  }
+  if (nativeFolderPickerPromise) {
+    throw workspaceError('WORKSPACE_NATIVE_PICKER_BUSY', 'A Windows folder picker is already open. Finish or cancel it before starting another one.');
+  }
+  let startingPath = '';
+  try { startingPath = requireAbsoluteDirectoryPath(initialPath); } catch {}
+  const invocation = windowsFolderPickerInvocation(startingPath);
+  const pending = new Promise((resolvePicker, rejectPicker) => {
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: root,
+      env: { ...process.env, ...invocation.env },
+      shell: false,
+      windowsHide: invocation.windowsHide,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, nativeFolderPickerTimeoutMs);
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => {
+      clearTimeout(timer);
+      rejectPicker(workspaceError('WORKSPACE_NATIVE_PICKER_FAILED', `Windows folder picker could not start: ${error.message}`));
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut) {
+        rejectPicker(workspaceError('WORKSPACE_NATIVE_PICKER_TIMEOUT', `Windows folder picker timed out after ${nativeFolderPickerTimeoutMs}ms.`));
+        return;
+      }
+      if (code !== 0) {
+        const detail = redactSecrets(stderr.trim() || `PowerShell exited with code ${code}.`);
+        rejectPicker(workspaceError('WORKSPACE_NATIVE_PICKER_FAILED', `Windows folder picker failed: ${detail}`));
+        return;
+      }
+      const path = parseNativeFolderPickerOutput(stdout);
+      resolvePicker({ available: true, canceled: !path, path, source: 'windows-native' });
+    });
+  });
+  nativeFolderPickerPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (nativeFolderPickerPromise === pending) nativeFolderPickerPromise = null;
+  }
 }
 
 importLegacyState();
@@ -2639,6 +2696,11 @@ async function api(request, response, url) {
   }
   if (request.method === 'GET' && url.pathname === '/api/filesystem/directories') {
     return send(response, 200, await browseDirectories(url.searchParams.get('path')));
+  }
+  if (request.method === 'POST' && url.pathname === '/api/filesystem/pick-directory') {
+    const payload = await body(request);
+    const active = getWorkspace(getSetting('active_workspace_id'));
+    return send(response, 200, await pickNativeFolder(payload.path || active?.git_root || ''));
   }
   if (request.method === 'POST' && url.pathname === '/api/workspaces/validate') {
     return send(response, 200, await validateWorkspacePath((await body(request)).path));

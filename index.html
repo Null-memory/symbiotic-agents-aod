@@ -168,7 +168,7 @@
         <section class="workspace-registry" aria-labelledby="workspaceRegistryTitle"><div class="workspace-dialog-section-head"><span>REGISTERED</span><strong id="workspaceRegistryTitle">已注册项目</strong></div><div class="workspace-list" id="workspaceList"></div></section>
         <section class="workspace-picker" aria-labelledby="workspacePickerTitle">
           <div class="workspace-dialog-section-head"><span>LOCAL DIRECTORY</span><strong id="workspacePickerTitle">浏览或输入绝对路径</strong></div>
-          <div class="workspace-path-row"><input id="workspacePath" type="text" autocomplete="off" spellcheck="false" placeholder="C:\path\to\git-project" aria-label="项目绝对路径" /><button class="secondary" id="validateWorkspace" type="button">验证</button></div>
+          <div class="workspace-path-row"><input id="workspacePath" type="text" autocomplete="off" spellcheck="false" placeholder="C:\path\to\git-project" aria-label="项目绝对路径" /><div class="workspace-path-actions"><button class="secondary" id="pickWorkspaceDirectory" type="button" title="打开 Windows 文件夹选择器">Windows 文件夹</button><button class="secondary" id="validateWorkspace" type="button">验证</button></div></div>
           <div class="workspace-browser" id="workspaceBrowser" aria-label="服务器目录浏览"></div>
           <div class="workspace-validation" id="workspaceValidation"><p>选择一个包含至少一次提交的 Git 仓库。</p></div>
         </section>

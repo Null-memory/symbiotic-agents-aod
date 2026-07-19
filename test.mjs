@@ -9,7 +9,7 @@ const fixture = await mkdtemp(join(tmpdir(), 'aod-integration-'));
 const secondaryWorkspace = await mkdtemp(join(tmpdir(), 'aod-workspace-b-'));
 const secondaryNestedFolder = join(secondaryWorkspace, 'packages', 'demo');
 const port = 4928;
-const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'native-folder-picker-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {

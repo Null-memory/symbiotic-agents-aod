@@ -19,6 +19,7 @@ export function createWorkspaceController({ root = document, request, onSelected
   const browser = root.querySelector('#workspaceBrowser');
   const validationPanel = root.querySelector('#workspaceValidation');
   const selectButton = root.querySelector('#selectWorkspace');
+  const pickButton = root.querySelector('#pickWorkspaceDirectory');
   let state = { activeWorkspaceId: null, workspaces: [] };
   let validation = null;
 
@@ -123,6 +124,34 @@ export function createWorkspaceController({ root = document, request, onSelected
     } catch (error) { showError(error); }
   };
 
+  const pickNativePath = async () => {
+    if (!pickButton) return;
+    pickButton.disabled = true;
+    pickButton.textContent = '等待 Windows 窗口…';
+    validation = null;
+    selectButton.disabled = true;
+    validationPanel.className = 'workspace-validation is-loading';
+    validationPanel.textContent = '请在 Windows 文件夹窗口中选择项目目录；取消窗口不会改变当前项目。';
+    try {
+      const result = await request('/api/filesystem/pick-directory', {
+        method: 'POST',
+        body: JSON.stringify({ path: pathInput.value.trim() }),
+      });
+      if (result.canceled || !result.path) {
+        validationPanel.className = 'workspace-validation';
+        validationPanel.textContent = '已取消选择。你仍可以输入路径或使用目录浏览。';
+        return;
+      }
+      pathInput.value = result.path;
+      await validatePath(result.path);
+    } catch (error) {
+      showError(error);
+    } finally {
+      pickButton.disabled = false;
+      pickButton.textContent = 'Windows 文件夹';
+    }
+  };
+
   const render = nextState => {
     state = { activeWorkspaceId: nextState.activeWorkspaceId, workspaces: nextState.workspaces || [] };
     const active = state.workspaces.find(workspace => workspace.id === state.activeWorkspaceId);
@@ -150,6 +179,7 @@ export function createWorkspaceController({ root = document, request, onSelected
   selector.addEventListener('click', open);
   root.querySelector('#closeWorkspaceDialog').addEventListener('click', () => dialog.close());
   root.querySelector('#cancelWorkspace').addEventListener('click', () => dialog.close());
+  pickButton?.addEventListener('click', pickNativePath);
   root.querySelector('#validateWorkspace').addEventListener('click', () => validatePath(pathInput.value));
   pathInput.addEventListener('keydown', event => {
     if (event.key === 'Enter') { event.preventDefault(); validatePath(pathInput.value); }
@@ -165,5 +195,5 @@ export function createWorkspaceController({ root = document, request, onSelected
     } catch (error) { showError(error); }
   });
 
-  return { render, open, browse, validatePath };
+  return { render, open, browse, validatePath, pickNativePath };
 }
