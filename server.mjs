@@ -4,11 +4,13 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { networkInterfaces } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { buildApprovalInbox } from './approval-domain.mjs';
 import { agentProfileCatalog, buildAgentInvocation, freezeAgentProfile } from './agent-profile-domain.mjs';
 import { acceptanceCommandGuidance, buildBoundedGroupContext, completedGroupTurnMemberIds, groupPhaseResponseGuidance, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
+import { buildMobilePairingPayload, generateMobileToken, generatePairingCode, hashMobileSecret, isLoopbackAddress, parseBearerToken } from './mobile-auth-domain.mjs';
 import { nativeFolderPickerSupported, parseNativeFolderPickerOutput, windowsFolderPickerInvocation } from './native-folder-picker-domain.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
@@ -20,6 +22,14 @@ const legacyStatePath = join(aodDir, 'state.json');
 const handoffDir = join(aodDir, 'handoffs');
 const configPath = join(root, '.aod.config.json');
 const port = Number(process.env.PORT || 4821);
+const appVersion = (() => {
+  try { return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version || 'unknown'; } catch { return 'unknown'; }
+})();
+const bindHost = String(process.env.AOD_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
+const mobileEnabled = /^(1|true|yes|on)$/i.test(String(process.env.AOD_MOBILE_ENABLED || ''));
+const mobilePublicUrlOverride = String(process.env.AOD_PUBLIC_URL || '').trim().replace(/\/$/, '');
+const mobilePairingTtlMs = 5 * 60 * 1000;
+const qrCodeModule = await import('qrcode').catch(() => null);
 const agents = ['codex', 'claude-code', 'antigravity'];
 const statuses = ['draft', 'preparing', 'ready', 'running', 'verifying', 'reviewing', 'repairing', 'merge_ready', 'merging', 'conflict_review', 'recovery_required', 'failed', 'cancelled', 'merged'];
 const transitions = {
@@ -316,6 +326,24 @@ db.exec(`
     review_json TEXT,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS mobile_pairings (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    base_url TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_mobile_pairings_expiry ON mobile_pairings(expires_at, consumed_at);
+  CREATE TABLE IF NOT EXISTS mobile_devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_mobile_devices_active ON mobile_devices(revoked_at, last_seen_at);
 `);
 migrateAgentGroupMembers(db);
 
@@ -356,6 +384,122 @@ function getSetting(key) { return db.prepare('SELECT value FROM settings WHERE k
 function setSetting(key, value) { db.prepare('INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value)); }
 function currentMode() { return getSetting('run_mode') || 'hybrid'; }
 function maxConcurrency() { return Math.max(1, Number(getSetting('max_concurrency') || 3)); }
+
+function httpError(code, status, message) {
+  return Object.assign(new Error(message), { code, status });
+}
+
+function mobilePublicUrl() {
+  if (mobilePublicUrlOverride) return mobilePublicUrlOverride;
+  if (!mobileEnabled) return null;
+  const addresses = Object.values(networkInterfaces()).flat().filter(Boolean);
+  const tailscale = addresses.find(item => (item.family === 'IPv4' || item.family === 4) && !item.internal && /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(item.address));
+  return tailscale ? `http://${tailscale.address}:${port}` : null;
+}
+
+function mobileStatus() {
+  const publicUrl = mobilePublicUrl();
+  const localOnly = /^127\.|^localhost$|^::1$/.test(bindHost);
+  return {
+    enabled: mobileEnabled,
+    bindHost,
+    publicUrl,
+    reachable: mobileEnabled && !localOnly && Boolean(publicUrl),
+    pairingTtlMs: mobilePairingTtlMs,
+  };
+}
+
+function isLocalRequest(request) {
+  return isLoopbackAddress(request.socket?.remoteAddress);
+}
+
+function mobileDeviceForToken(token) {
+  if (!token) return null;
+  return db.prepare('SELECT * FROM mobile_devices WHERE token_hash = ? AND revoked_at IS NULL').get(hashMobileSecret(token)) || null;
+}
+
+function mobileRequestIsPublic(request, url) {
+  return (request.method === 'GET' && (url.pathname === '/api/health' || url.pathname === '/api/mobile/status'))
+    || (request.method === 'POST' && url.pathname === '/api/mobile/pairing/complete');
+}
+
+function authorizeRequest(request, url) {
+  const local = isLocalRequest(request);
+  if (local) return { local: true, device: null };
+  if (!mobileEnabled) throw httpError('MOBILE_REMOTE_DISABLED', 403, 'Remote mobile access is disabled.');
+  if (mobileRequestIsPublic(request, url)) return { local: false, device: null };
+  const token = parseBearerToken(request.headers.authorization);
+  const device = mobileDeviceForToken(token);
+  if (!device) throw httpError(token ? 'MOBILE_AUTH_INVALID' : 'MOBILE_AUTH_REQUIRED', 401, 'A valid mobile device token is required.');
+  db.prepare('UPDATE mobile_devices SET last_seen_at = ? WHERE id = ?').run(now(), device.id);
+  return { local: false, device };
+}
+
+function cleanupExpiredMobilePairings() {
+  db.prepare('DELETE FROM mobile_pairings WHERE expires_at <= ? OR consumed_at IS NOT NULL').run(now());
+}
+
+function requireMobileEnabled() {
+  if (!mobileEnabled) throw httpError('MOBILE_DISABLED', 409, 'Mobile access is disabled. Set AOD_MOBILE_ENABLED=1 and restart AOD.');
+}
+
+async function createMobilePairing() {
+  requireMobileEnabled();
+  const baseUrl = mobilePublicUrl();
+  if (!baseUrl || /^127\.|^localhost$|^::1$/.test(bindHost)) {
+    throw httpError('MOBILE_PUBLIC_URL_REQUIRED', 409, 'Set AOD_PUBLIC_URL to a reachable Tailscale URL and bind AOD to a non-loopback host before pairing.');
+  }
+  cleanupExpiredMobilePairings();
+  const code = generatePairingCode();
+  const expiresAt = new Date(Date.now() + mobilePairingTtlMs).toISOString();
+  const id = `MP-${crypto.randomUUID()}`;
+  db.prepare('INSERT INTO mobile_pairings(id, code_hash, base_url, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(id, hashMobileSecret(code), baseUrl, expiresAt, now());
+  const qrPayload = buildMobilePairingPayload({ baseUrl, code, expiresAt });
+  const qrDataUrl = qrCodeModule?.default?.toDataURL
+    ? await qrCodeModule.default.toDataURL(qrPayload, { errorCorrectionLevel: 'M', margin: 1, width: 280 })
+    : null;
+  return { id, code, expiresAt, url: baseUrl, qrPayload, qrDataUrl };
+}
+
+function completeMobilePairing(payload) {
+  requireMobileEnabled();
+  const code = String(payload?.code || '').trim().toUpperCase();
+  if (!code) throw httpError('MOBILE_PAIRING_CODE_REQUIRED', 400, 'A pairing code is required.');
+  cleanupExpiredMobilePairings();
+  let transactionStarted = false;
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    transactionStarted = true;
+    const pairing = db.prepare('SELECT * FROM mobile_pairings WHERE code_hash = ? AND consumed_at IS NULL AND expires_at > ?')
+      .get(hashMobileSecret(code), now());
+    if (!pairing) throw httpError('MOBILE_PAIRING_INVALID', 401, 'The pairing code is invalid or expired.');
+    const deviceName = String(payload?.deviceName || 'Android device').trim().slice(0, 80) || 'Android device';
+    const deviceId = `MD-${crypto.randomUUID()}`;
+    const token = generateMobileToken();
+    const createdAt = now();
+    const consumed = db.prepare('UPDATE mobile_pairings SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(createdAt, pairing.id);
+    if (!consumed.changes) throw httpError('MOBILE_PAIRING_INVALID', 401, 'The pairing code is invalid or expired.');
+    db.prepare('INSERT INTO mobile_devices(id, name, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)')
+      .run(deviceId, deviceName, hashMobileSecret(token), createdAt, createdAt);
+    db.exec('COMMIT');
+    transactionStarted = false;
+    return { deviceId, deviceName, token, url: pairing.base_url };
+  } catch (error) {
+    if (transactionStarted) db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function listMobileDevices() {
+  return db.prepare('SELECT id, name, created_at, last_seen_at, revoked_at FROM mobile_devices ORDER BY created_at DESC').all();
+}
+
+function revokeMobileDevice(id) {
+  const result = db.prepare('UPDATE mobile_devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(now(), id);
+  if (!result.changes) throw httpError('MOBILE_DEVICE_NOT_FOUND', 404, 'Mobile device was not found or already revoked.');
+  return db.prepare('SELECT id, name, created_at, last_seen_at, revoked_at FROM mobile_devices WHERE id = ?').get(id);
+}
 
 function workspaceFromRow(row) {
   if (!row) return null;
@@ -2680,7 +2824,41 @@ function send(response, status, body) { response.writeHead(status, { 'content-ty
 async function body(request) { let data = ''; for await (const chunk of request) data += chunk; if (!data) return {}; try { return JSON.parse(data); } catch { throw new Error('Request body must be JSON.'); } }
 
 async function api(request, response, url) {
-  if (request.method === 'GET' && url.pathname === '/api/health') return send(response, 200, { ok: true, gitReady: await gitReady(), workspace: root, database: databasePath, metrics: await healthMetrics(), lastBackupAt: getSetting('last_backup_at') });
+  request.mobileContext = authorizeRequest(request, url);
+  if (request.method === 'GET' && url.pathname === '/api/mobile/status') return send(response, 200, mobileStatus());
+  if (request.method === 'POST' && url.pathname === '/api/mobile/pairing/start') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Pairing must be started from the local desktop console.');
+    return send(response, 200, await createMobilePairing());
+  }
+  if (request.method === 'POST' && url.pathname === '/api/mobile/pairing/complete') return send(response, 200, completeMobilePairing(await body(request)));
+  if (request.method === 'GET' && url.pathname === '/api/mobile/devices') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Device management is available from the local desktop console.');
+    return send(response, 200, { devices: listMobileDevices() });
+  }
+  const mobileDeviceMatch = url.pathname.match(/^\/api\/mobile\/devices\/([A-Za-z0-9-]+)\/revoke$/);
+  if (mobileDeviceMatch && request.method === 'POST') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Device management is available from the local desktop console.');
+    return send(response, 200, revokeMobileDevice(mobileDeviceMatch[1]));
+  }
+  if (request.method === 'GET' && url.pathname === '/api/health') {
+    if (request.mobileContext.local) {
+      return send(response, 200, {
+        ok: true,
+        version: appVersion,
+        gitReady: await gitReady(),
+        metrics: await healthMetrics(),
+        workspace: root,
+        database: databasePath,
+        lastBackupAt: getSetting('last_backup_at')
+      });
+    }
+    const status = mobileStatus();
+    return send(response, 200, {
+      ok: true,
+      version: appVersion,
+      mobile: { enabled: status.enabled, reachable: status.reachable }
+    });
+  }
   if (request.method === 'GET' && url.pathname === '/api/stream') {
     response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
     const after = Math.max(0, Number(url.searchParams.get('after') || request.headers['last-event-id'] || 0) || 0);
@@ -2847,6 +3025,7 @@ async function api(request, response, url) {
     return send(response, 201, getTask(id));
   }
   const taskMatch = url.pathname.match(/^\/api\/tasks\/(T-\d+)(?:\/(prepare|start|status|verify|merge|review))?$/);
+  if (taskMatch && request.method === 'GET' && !taskMatch[2]) return send(response, 200, requireTask(taskMatch[1]));
   if (taskMatch && request.method === 'POST') {
     const [, id, action] = taskMatch;
     const task = requireTask(id);
@@ -2895,15 +3074,16 @@ const httpServer = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) await api(request, response, url);
+    else if (!isLocalRequest(request)) send(response, 403, { error: 'The desktop console is available only from the local machine.' });
     else await staticFile(response, url.pathname);
   } catch (error) {
-    send(response, 400, {
+    send(response, Number(error?.status) || 400, {
       error: error instanceof Error ? error.message : 'Unexpected error.',
       ...(error?.code ? { code: error.code } : {}),
     });
   }
 });
-httpServer.listen(port, '127.0.0.1', () => console.log(`AOD console is available at http://127.0.0.1:${port}`));
+httpServer.listen(port, bindHost, () => console.log(`AOD console is available at http://${bindHost}:${port}`));
 
 function flushRuntimeBuffers() {
   return { agentStreams: agentStreamBuffers.flushAll(), taskOutputs: taskOutputBuffers.flushAll() };

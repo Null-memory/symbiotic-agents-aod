@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { networkInterfaces } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -9,7 +10,8 @@ const fixture = await mkdtemp(join(tmpdir(), 'aod-integration-'));
 const secondaryWorkspace = await mkdtemp(join(tmpdir(), 'aod-workspace-b-'));
 const secondaryNestedFolder = join(secondaryWorkspace, 'packages', 'demo');
 const port = 4928;
-const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'native-folder-picker-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const remoteHost = Object.values(networkInterfaces()).flat().find(item => item && (item.family === 'IPv4' || item.family === 4) && !item.internal)?.address || null;
+const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'native-folder-picker-domain.mjs', 'mobile-auth-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {
@@ -38,6 +40,20 @@ async function apiFailure(path, options = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { 'content-type': 'application/json' }, ...options });
   const data = await response.json();
   assert.equal(response.ok, false, 'Expected API request to fail.');
+  return data;
+}
+async function remoteApi(path, options = {}) {
+  assert.ok(remoteHost, 'A non-loopback interface is required for remote mobile auth integration coverage.');
+  const response = await fetch(`http://${remoteHost}:${port}${path}`, { headers: { 'content-type': 'application/json', ...(options.headers || {}) }, ...options });
+  const data = await response.json();
+  assert.equal(response.ok, true, data.error);
+  return data;
+}
+async function remoteApiFailure(path, options = {}) {
+  assert.ok(remoteHost, 'A non-loopback interface is required for remote mobile auth integration coverage.');
+  const response = await fetch(`http://${remoteHost}:${port}${path}`, { headers: { 'content-type': 'application/json', ...(options.headers || {}) }, ...options });
+  const data = await response.json();
+  assert.equal(response.ok, false, 'Expected remote API request to fail.');
   return data;
 }
 async function readSseInitialState() {
@@ -165,7 +181,11 @@ try {
       antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], reviewArgs: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
     }
   }));
-  daemon = spawn(process.execPath, ['server.mjs'], { cwd: fixture, env: { ...process.env, PORT: String(port) }, windowsHide: true });
+  daemon = spawn(process.execPath, ['server.mjs'], {
+    cwd: fixture,
+    env: { ...process.env, PORT: String(port), AOD_BIND_HOST: '0.0.0.0', AOD_MOBILE_ENABLED: '1', AOD_PUBLIC_URL: `http://100.64.0.4:${port}` },
+    windowsHide: true
+  });
   await waitForHealth();
 
   const initialWorkspaces = await api('/api/workspaces');
@@ -173,6 +193,36 @@ try {
   assert.equal(initialWorkspaces.workspaces.length, 1);
   assert.equal(initialWorkspaces.workspaces[0].gitRoot, fixture);
   assert.equal(initialWorkspaces.workspaces[0].dirty, false, 'Ignored control-plane files must not make the project dirty.');
+  const mobileStatus = await api('/api/mobile/status');
+  assert.equal(mobileStatus.enabled, true);
+  assert.equal(mobileStatus.reachable, true);
+  assert.equal(mobileStatus.publicUrl, `http://100.64.0.4:${port}`);
+  const pairing = await api('/api/mobile/pairing/start', { method: 'POST', body: '{}' });
+  assert.match(pairing.code, /^AOD-/);
+  assert.equal(JSON.parse(pairing.qrPayload).code, pairing.code);
+  assert.equal('token' in JSON.parse(pairing.qrPayload), false);
+  if (remoteHost) {
+    const remoteHealth = await remoteApi('/api/health');
+    assert.deepEqual(Object.keys(remoteHealth).sort(), ['mobile', 'ok', 'version']);
+    assert.equal('workspace' in remoteHealth, false);
+    assert.equal('database' in remoteHealth, false);
+    assert.equal('metrics' in remoteHealth, false);
+    assert.equal(remoteHealth.mobile.enabled, true);
+    assert.equal(remoteHealth.mobile.reachable, true);
+    const unauthorized = await remoteApiFailure('/api/state');
+    assert.equal(unauthorized.code, 'MOBILE_AUTH_REQUIRED');
+    const paired = await remoteApi('/api/mobile/pairing/complete', { method: 'POST', body: JSON.stringify({ code: pairing.code, deviceName: 'Test Android' }) });
+    assert.equal(paired.deviceName, 'Test Android');
+    assert.equal(paired.token.length >= 40, true);
+    const authorizedState = await remoteApi('/api/state', { headers: { authorization: `Bearer ${paired.token}` } });
+    assert.equal(authorizedState.activeWorkspaceId, 'WS-001');
+    const deviceRows = await api('/api/mobile/devices');
+    assert.equal(deviceRows.devices.some(device => device.id === paired.deviceId && device.name === 'Test Android'), true);
+    await api(`/api/mobile/devices/${paired.deviceId}/revoke`, { method: 'POST', body: '{}' });
+    const revoked = await remoteApiFailure('/api/state', { headers: { authorization: `Bearer ${paired.token}` } });
+    assert.equal(revoked.code, 'MOBILE_AUTH_INVALID');
+    assert.equal((await remoteApiFailure('/api/mobile/pairing/complete', { method: 'POST', body: JSON.stringify({ code: pairing.code, deviceName: 'Replay' }) })).code, 'MOBILE_PAIRING_INVALID');
+  }
   assert.equal((await apiFailure('/api/workspaces/validate', { method: 'POST', body: JSON.stringify({ path: 'relative-project' }) })).code, 'WORKSPACE_PATH_NOT_ABSOLUTE');
   const browsedDirectories = await api(`/api/filesystem/directories?path=${encodeURIComponent(fixture)}`);
   assert.equal(browsedDirectories.path, fixture);

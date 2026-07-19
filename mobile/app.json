@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "AOD Mobile",
+    "slug": "aod-mobile",
+    "version": "0.1.0",
+    "orientation": "default",
+    "scheme": "aodmobile",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "com.aod.mobile",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": true
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "允许 AOD 扫描桌面端的配对二维码"
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

@@ -18,6 +18,28 @@ npm start
 
 当前选择只决定新建计划、运行、独立任务和群组会话的默认项目。已有实体永久绑定到创建时的项目，切换顶栏项目不会让旧任务、Reviewer、合并或 GitHub 发布改到其他仓库。脏仓库可以注册并用于只读群组讨论，但创建运行、worktree 或合并时仍受现有 clean gate 限制。
 
+## Android 移动端
+
+移动端位于 `mobile/`，使用 Expo Android 客户端连接桌面 AOD 服务。第一版默认关闭远程访问；需要先在 Windows 安装并登录 Tailscale，然后用新的进程环境启动 AOD：
+
+```powershell
+$env:AOD_MOBILE_ENABLED = "1"
+$env:AOD_BIND_HOST = "0.0.0.0"
+$env:AOD_PUBLIC_URL = "http://100.x.x.x:4821"
+npm start
+```
+
+将 `100.x.x.x` 替换为 Windows 在 Tailscale 中的地址，并在 Windows 防火墙中允许对应端口。桌面端点击顶栏“手机连接”生成二维码，Android App 扫码后会保存独立设备令牌；令牌可在桌面端撤销。移动端与 Windows 必须同时在线，GitHub CLI 登录仍在桌面端完成。
+
+移动端开发命令：
+
+```powershell
+cd mobile
+npm install
+npm run typecheck
+npm start
+```
+
 ## 运行模式
 
 - `manual`：准备、启动 Agent、验收和合并均由操作者触发。

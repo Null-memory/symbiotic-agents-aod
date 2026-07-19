@@ -221,6 +221,28 @@ Windows 文件夹选择器由本机 AOD 服务调用，仅在服务和 Chrome �
 
 脏仓库允许注册，也允许发起只读群组讨论。创建运行、准备 worktree 和合并仍要求对应 Git 主工作区满足 clean gate。
 
+### 4.2 连接 Android 移动端
+
+移动端位于 `mobile/`，第一版使用 Android + Expo，通过 Tailscale 连接运行中的 Windows AOD。移动访问默认关闭，启动前配置：
+
+```powershell
+$env:AOD_MOBILE_ENABLED = "1"
+$env:AOD_BIND_HOST = "0.0.0.0"
+$env:AOD_PUBLIC_URL = "http://100.x.x.x:4821"
+npm start
+```
+
+将 `100.x.x.x` 替换为 Windows 的 Tailscale IPv4 地址，并在 Windows 防火墙中允许端口。桌面端顶栏的“手机连接”会生成有效期 5 分钟的一次性二维码；Android App 扫码后保存设备令牌。设备可以在桌面端撤销，GitHub CLI 登录和设备授权仍在桌面端完成。
+
+开发移动端：
+
+```powershell
+cd mobile
+npm install
+npm run typecheck
+npm start
+```
+
 ## 5. 认识桌面工作台
 
 ### 左侧导航
@@ -594,7 +616,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4821/api/maintenance/cleanu
 ## 15. 当前限制
 
 - 仅支持单机、单操作者和本地 Git 仓库。
-- 移动端界面暂未实施，建议使用 1024px 以上桌面视口。
+- Android 移动端需要 Tailscale 和正在运行的 Windows AOD；第一版不提供云端访问、iOS 客户端或推送通知。
 - GitHub PR 最终合并必须人工完成。
 - AOD 不负责安装、登录或升级 Agent CLI。
 - Agent 的实际质量取决于提示词、CLI 能力、模型权限和任务文件边界。
