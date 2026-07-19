@@ -1,4 +1,17 @@
 export const GROUP_ROLES = Object.freeze(['executor', 'reviewer', 'fixer', 'advisor']);
+const GROUP_TURN_COMPLETION_STATUSES = new Set(['completed', 'skipped', 'replaced']);
+
+export function recoveryTurnStatus(action) {
+  if (action === 'skip') return 'skipped';
+  if (action === 'replace') return 'replaced';
+  return 'superseded';
+}
+
+export function completedGroupTurnMemberIds(turns) {
+  return new Set((turns || [])
+    .filter(turn => GROUP_TURN_COMPLETION_STATUSES.has(turn.status))
+    .map(turn => turn.member_id));
+}
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/i;
 

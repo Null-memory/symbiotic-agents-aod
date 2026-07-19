@@ -6,6 +6,7 @@ import {
   validateConsensusDraft,
   validateGroupDraft,
 } from './group-domain.mjs';
+import * as groupDomain from './group-domain.mjs';
 
 const supportedAgents = ['codex', 'claude-code', 'antigravity'];
 
@@ -36,6 +37,21 @@ const memberSnapshot = {
 };
 
 const allowedAcceptancePrefixes = ['node ', 'npm test', 'git diff'];
+
+test('persists replacement completion across separate recovery requests', () => {
+  assert.equal(typeof groupDomain.recoveryTurnStatus, 'function');
+  assert.equal(typeof groupDomain.completedGroupTurnMemberIds, 'function');
+  assert.equal(groupDomain.recoveryTurnStatus('replace'), 'replaced');
+
+  const completed = groupDomain.completedGroupTurnMemberIds([
+    { member_id: 'member-builder', status: 'replaced' },
+    { member_id: 'member-critic', status: 'completed' },
+    { member_id: 'member-repair', status: 'skipped' },
+    { member_id: 'ignored-member', status: 'superseded' },
+  ]);
+
+  assert.deepEqual([...completed], ['member-builder', 'member-critic', 'member-repair']);
+});
 
 function validConsensusDraft(overrides = {}) {
   return {

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { buildApprovalInbox } from './approval-domain.mjs';
-import { validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
+import { completedGroupTurnMemberIds, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { buildProcessMetrics, classifyInterruptedProcess } from './process-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
@@ -1418,7 +1418,7 @@ async function recoverGroupTurn(turn, payload) {
   }
   if (payload.action === 'skip' && turn.phase === 'synthesis') throw new Error('The moderator synthesis turn cannot be skipped.');
 
-  db.prepare("UPDATE group_turns SET status = ?, finished_at = ? WHERE id = ?").run(payload.action === 'skip' ? 'skipped' : 'superseded', now(), turn.id);
+  db.prepare("UPDATE group_turns SET status = ?, finished_at = ? WHERE id = ?").run(recoveryTurnStatus(payload.action), now(), turn.id);
   if (payload.action === 'skip') {
     appendGroupMessage(session.id, { round: turn.round, senderKind: 'system', phase: 'recovery', content: `${member?.displayName || turn.member_id} was skipped by the operator.` });
   } else {
@@ -1431,9 +1431,8 @@ async function recoverGroupTurn(turn, payload) {
     }
   }
 
-  const completed = new Set(db.prepare("SELECT member_id FROM group_turns WHERE session_id = ? AND round = ? AND phase = ? AND status IN ('completed', 'skipped')")
-    .all(session.id, turn.round, turn.phase).map(item => item.member_id));
-  if (payload.action === 'replace') completed.add(turn.member_id);
+  const completed = completedGroupTurnMemberIds(db.prepare('SELECT member_id, status FROM group_turns WHERE session_id = ? AND round = ? AND phase = ?')
+    .all(session.id, turn.round, turn.phase));
   if (session.members.every(item => completed.has(item.id))) {
     updateGroupSession(session.id, { status: 'discussing', current_round: Math.max(session.current_round, turn.round), recovery_note: null });
     runGroupDiscussion(session.id).catch(() => {});
