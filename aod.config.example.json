@@ -13,16 +13,20 @@
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"],
-      "discussionArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
+      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-"],
+      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+      "stdin": "{{prompt}}",
+      "streamProtocol": "codex-jsonl",
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
-      "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"],
-      "discussionArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"],
-      "reviewArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"],
+      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--permission-mode", "acceptEdits"],
+      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "stdin": "{{prompt}}",
+      "streamProtocol": "claude-stream-json",
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "antigravity": {
@@ -30,7 +34,14 @@
       "args": ["chat", "--mode", "agent", "-"],
       "discussionArgs": ["chat", "--mode", "plan", "-"],
       "stdin": "{{prompt}}",
+      "streamProtocol": "text",
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     }
+  },
+  "planner": {
+    "command": "codex",
+    "args": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+    "stdin": "{{prompt}}",
+    "streamProtocol": "codex-jsonl"
   }
 }

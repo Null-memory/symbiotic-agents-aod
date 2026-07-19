@@ -22,6 +22,13 @@ const [html, stylesEntry, tokensCss, shellCss, componentsCss, viewsCss, script, 
 ]);
 const css = [stylesEntry, tokensCss, shellCss, componentsCss, viewsCss].join('\n');
 const configExample = JSON.parse(configExampleText);
+assert.equal(configExample.agents.codex.streamProtocol, 'codex-jsonl', 'Codex example must enable structured streaming.');
+assert.equal(configExample.agents['claude-code'].streamProtocol, 'claude-stream-json', 'Claude example must enable partial-message streaming.');
+assert.equal(configExample.agents.codex.args.includes('--json'), true, 'Codex task adapter must request JSONL events.');
+assert.equal(configExample.agents['claude-code'].args.includes('stream-json'), true, 'Claude task adapter must request stream-json output.');
+assert.equal(configExample.planner?.streamProtocol, 'codex-jsonl', 'Planner must use the lightweight structured Codex profile.');
+assert.equal(configExample.planner?.args.includes('--ephemeral'), true, 'Planner must avoid persistent session startup work.');
+assert.equal(configExample.agents['claude-code'].discussionArgs.includes('--strict-mcp-config'), true, 'Claude discussion must avoid loading unrelated MCP servers.');
 
 for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'inspectorResizeHandle']) {
   assert.equal(html.includes(`id="${id}"`), true, `Desktop shell is missing #${id}.`);
@@ -29,6 +36,7 @@ for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'i
 for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCount', 'contextDockViewport']) {
   assert.equal(html.includes(`id="${id}"`), true, `Adaptive workbench is missing #${id}.`);
 }
+assert.equal(html.includes('id="taskStreamTools"'), true, 'Task output must reserve a surface for expandable tool events.');
 for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'validateWorkspace', 'selectWorkspace']) {
   assert.equal(html.includes(`id="${id}"`), true, `Workspace selection is missing #${id}.`);
 }
@@ -69,9 +77,14 @@ assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.topbar-context\{disp
 assert.equal(layoutModule.includes('createContextDock'), true, 'Layout must delegate inspector behavior to the shared context dock.');
 assert.equal(contextDockModule.includes('aria-valuenow'), true, 'The context dock resize separator must expose its current width.');
 assert.equal(apiModule.includes('Last-Event-ID'), true);
+assert.equal(apiModule.includes('agent_stream'), true, 'SSE must subscribe to persisted agent stream events.');
 assert.equal(runCenterModule.includes('createRunCenter'), true);
 assert.equal(groupConsoleModule.includes('createGroupConsole'), true);
 assert.equal(script.includes('buildGroupTimelineItems'), true, 'The message timeline must project active group turns before replies complete.');
+assert.equal(script.includes('/api/agent-stream'), true, 'The app must recover persisted stream events after reload.');
+assert.equal(script.includes('renderAgentTools'), true, 'The app must render expandable tool summaries.');
+assert.equal(script.includes('loadAgentStreamPages'), true, 'Stream recovery must load every persisted page.');
+assert.equal(script.includes('latestAgentProcessEvents'), true, 'Task output must select one current Agent process.');
 assert.equal(script.includes('正在生成本轮内容'), true, 'The message timeline must explain buffered CLI output while a turn is running.');
 assert.equal(viewsCss.includes('.group-turn-progress'), true, 'Active group turns need a visible timeline progress state.');
 assert.equal(dialogsModule.includes('createDialogs'), true);
@@ -83,6 +96,10 @@ for (const modulePath of ['ui/context-dock.js', 'ui/render-scheduler.js', 'ui/ru
 assert.match(streamEndpointSource, /last-event-id/i);
 assert.match(streamEndpointSource, /streamReplay/);
 assert.match(broadcastSource, /id:/);
+assert.equal(server.includes("process.once('SIGTERM'"), true, 'The daemon must flush stream buffers on graceful shutdown.');
+assert.equal(server.includes('flushRuntimeBuffers'), true, 'The daemon must expose one runtime buffer flush path.');
+const shutdownSource = server.slice(server.indexOf('function shutdownDaemon'), server.indexOf("process.once('SIGINT'"));
+assert.equal(shutdownSource.slice(0, shutdownSource.indexOf('const finish')).includes('flushRuntimeBuffers()'), false, 'Shutdown must stop child producers before its final stream flush.');
 
 for (const id of ['groupsBoard', 'openGroupDialog', 'groupDialog', 'groupConsole', 'groupMessages', 'groupConsensus']) {
   assert.equal(html.includes(`id="${id}"`), true, `Console is missing #${id}.`);
@@ -106,8 +123,12 @@ assert.equal(script.includes('renderAgentHealth'), true, 'Agent diagnostics need
 assert.equal(script.includes('renderApprovals'), true, 'Approval inbox needs a state renderer.');
 assert.equal(script.includes('renderMetrics'), true, 'Operational metrics need a state renderer.');
 assert.equal(script.includes('renderProcessMonitor'), true, 'Process monitor needs a state renderer.');
+assert.equal(script.includes('summary.avgFirstEventMs'), true, 'Operational metrics must expose time to first Agent event.');
+assert.equal(script.includes('summary.avgFirstTextMs'), true, 'Operational metrics must expose time to first Agent text.');
+assert.equal(script.includes('item.first_event_at'), true, 'Process rows must expose individual first-event latency.');
 assert.equal(script.includes('recoveryStateCopy'), true, 'Process recovery states need explicit user-facing labels.');
 assert.equal(viewsCss.includes('.metrics-adapter-row'), true, 'Metrics need stable per-adapter rows.');
+assert.equal(viewsCss.includes('.metrics-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))'), true, 'Eight latency metrics need a balanced four-column desktop grid.');
 assert.equal(viewsCss.includes('.process-row'), true, 'Process monitor needs stable process rows.');
 assert.equal(viewsCss.includes('-webkit-line-clamp:4'), true, 'Event summaries must not expand into full stack traces.');
 assert.equal(script.includes('data-approval-action'), true, 'Approval inbox needs explicit action controls.');

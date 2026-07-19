@@ -90,6 +90,10 @@ npm start
 
 调度器使用配置的命令和参数启动进程，将工作目录设为该任务 worktree，并把标准输出、标准错误保存到任务记录。不同版本的 Codex、Claude Code 与反重力 2.0 命令行参数可能不同，因此示例配置仅是结构模板。
 
+`streamProtocol` 用于声明 CLI 输出协议：Codex 使用 `codex-jsonl`，Claude Code 使用 `claude-stream-json`，不支持结构化事件的适配器使用 `text`。AOD 将正文、工具调用、状态、告警和用量事件批量写入 SQLite，并通过 SSE 的 `agent_stream` 事件实时推送。刷新或断线后可通过 `GET /api/agent-stream?after=<global-id>` 分页恢复，也可用 `GET /api/processes/:id/stream?after=<sequence>` 查看单个进程。工具详情会脱敏并限制在 32KB；任务摘要日志按 100ms 或 8KB 批量写入，避免高频 token 回调拖慢 Agent。
+
+运行指标分别显示“首事件”和“首正文”：前者表示 CLI 首次返回真实状态或工具事件，后者表示首段可读回复；编排器自己的进程启动事件不参与统计。示例配置使用临时 Codex 会话、标准输入和独立轻量规划器，并关闭讨论阶段无关的 Claude 会话与 MCP 加载，以降低首次响应时间。
+
 群组讨论在会话绑定项目的 Git 根目录运行，因此 Agent 可以读取真实代码上下文。讨论优先使用只读 `discussionArgs`，缺省时只回退到 `reviewArgs`，绝不会使用普通任务的可写 `args`。AOD 在每个回合前后比较 HEAD 和完整 porcelain 状态；检测到变化时冻结会话为 `recovery_required`，保留现场且不会自动 reset、checkout 或删除文件。检查者仍必须配置只读 `reviewArgs`，并在检查结束后验证 detached worktree 的提交和文件状态未变化。`defaults.groupTurnTimeoutMs` 控制单个讨论回合超时；检查和修复默认沿用 `defaults.reviewTimeoutMs`。群组讨论、任务执行、角色检查和冲突 Reviewer 共用全局并发槽位。
 
 验收命令默认仅允许 `npm`、`node`、`pnpm`、`yarn`、`git`、`python` 和 `py` 前缀。可在 `security.allowedAcceptancePrefixes` 调整。常见令牌会从结构化日志和验收输出中脱敏。
@@ -102,7 +106,7 @@ GitHub CLI 默认路径会自动检测 Windows 标准安装位置。若使用自
 
 ## 运维
 
-`POST /api/maintenance/backup` 创建 SQLite 快照，保留最近 7 份。`POST /api/maintenance/cleanup` 只清理超过保留期且状态为已完成、已取消或失败的非锁定 worktree；冲突审查任务永不自动清理。
+`POST /api/maintenance/backup` 创建 SQLite 快照，保留最近 7 份。`POST /api/maintenance/flush` 立即冲刷尚在内存中的 Agent 流和任务摘要；正常 `SIGINT`/`SIGTERM` 关闭也会自动冲刷。`POST /api/maintenance/cleanup` 只清理超过保留期且状态为已完成、已取消或失败的非锁定 worktree；冲突审查任务永不自动清理。
 
 ## 验证
 

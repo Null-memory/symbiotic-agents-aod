@@ -83,17 +83,27 @@ Copy-Item aod.config.example.json .aod.config.json
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "--sandbox", "workspace-write", "{{prompt}}"],
-      "discussionArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "{{prompt}}"],
+      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-"],
+      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+      "stdin": "{{prompt}}",
+      "streamProtocol": "codex-jsonl",
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
-      "args": ["--print", "--permission-mode", "acceptEdits", "{{prompt}}"],
-      "discussionArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"],
-      "reviewArgs": ["--print", "--permission-mode", "plan", "{{prompt}}"]
+      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--permission-mode", "acceptEdits"],
+      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "stdin": "{{prompt}}",
+      "streamProtocol": "claude-stream-json"
     }
+  },
+  "planner": {
+    "command": "codex",
+    "args": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+    "stdin": "{{prompt}}",
+    "streamProtocol": "codex-jsonl"
   }
 }
 ```
@@ -112,6 +122,8 @@ Copy-Item aod.config.example.json .aod.config.json
 | `discussionArgs` | 群组讨论的只读参数；缺省时只回退到 `reviewArgs` |
 | `reviewArgs` | 检查阶段的只读参数 |
 | `stdin` | 通过标准输入传递给 CLI 的内容 |
+| `streamProtocol` | 输出协议：`codex-jsonl`、`claude-stream-json` 或 `text` |
+| `planner` | 可选的独立轻量规划器配置；缺省时使用同名 Agent 适配器 |
 | `health.versionArgs` | 版本或基础可用性探针，默认 `--version` |
 | `health.authArgs` | 可选的非交互认证状态探针；不配置时不会猜测登录命令 |
 | `health.timeoutMs` | 单个体检探针超时，默认 10 秒 |
@@ -124,6 +136,16 @@ Copy-Item aod.config.example.json .aod.config.json
 - `{{prompt}}`：完整任务或讨论提示词。
 
 不同 CLI 版本的参数可能不同。首次使用前，建议在终端中手动执行对应命令，确认其可以非交互退出。Agent 群组页的“Agent 连接体检”会持久化命令路径、版本、认证探针状态和耗时，但 CLI 凭据仍只由对应工具管理，不写入 AOD 数据库。
+
+### 流式输出与响应速度
+
+- 群组、规划器、任务执行、角色检查、修复和冲突 Reviewer 都写入统一的 `agent_stream_events`。
+- SSE 使用 `agent_stream` 事件实时推送；页面刷新后按事件 ID 增量恢复，不依赖进程仍然存活。
+- `GET /api/agent-stream?sessionId=<id>&after=<global-event-id>` 读取会话流；也可使用 `taskId`、`runId` 或 `processId` 过滤。页面会自动翻页直到恢复完整历史。
+- `GET /api/processes/<process-id>/stream?after=<sequence>` 使用该进程内部的 sequence 增量读取，和全局事件 ID 不混用。
+- 工具事件默认只显示简写摘要，展开后显示经过脱敏的详情；单条详情最多 32KB。
+- “首事件”统计 CLI 第一个真实状态或工具信号，“首正文”统计第一段回复。进程启动通知不计入这两项，也不计为 Agent 输出。
+- 任务摘要日志按 100ms 或 8KB 合并写入；实时界面仍直接消费 SSE，不会因此延迟。
 
 ## 4. 启动 AOD
 
@@ -474,6 +496,14 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4821/api/maintenance/backup
 ```
 
 备份位于 `.aod/`，默认保留最近 7 份。
+
+### 立即冲刷 Agent 流
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4821/api/maintenance/flush
+```
+
+正常通过 `SIGINT` 或 `SIGTERM` 停止服务时会自动冲刷。Windows 的强制 `Stop-Process` 不会执行 Node 关闭处理器，更新服务前应先调用此接口或备份接口。
 
 ### 清理终态 worktree
 

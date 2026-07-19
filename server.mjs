@@ -6,9 +6,9 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { buildApprovalInbox } from './approval-domain.mjs';
-import { completedGroupTurnMemberIds, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
+import { buildBoundedGroupContext, completedGroupTurnMemberIds, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
-import { buildProcessMetrics, classifyInterruptedProcess } from './process-domain.mjs';
+import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent } from './process-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
@@ -43,6 +43,8 @@ const groupProcesses = new Map();
 const roleProcesses = new Map();
 const plannerProcesses = new Map();
 const processHeartbeats = new Map();
+const agentStreamBuffers = createFlushRegistry({ onError: error => console.error(`[agent-stream-flush] ${redactSecrets(error instanceof Error ? error.message : String(error))}`) });
+const taskOutputBuffers = createFlushRegistry({ onError: error => console.error(`[task-output-flush] ${redactSecrets(error instanceof Error ? error.message : String(error))}`) });
 const eventStreams = new Set();
 const streamReplay = [];
 let streamEventId = 0;
@@ -193,6 +195,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_agent_processes_run ON agent_processes(run_id, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_agent_processes_task ON agent_processes(task_id, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_agent_processes_agent ON agent_processes(agent, started_at DESC);
+  CREATE TABLE IF NOT EXISTS agent_stream_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    process_id TEXT NOT NULL REFERENCES agent_processes(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    stream TEXT NOT NULL DEFAULT 'stdout',
+    text_delta TEXT,
+    tool_call_id TEXT,
+    tool_name TEXT,
+    summary TEXT,
+    detail_json TEXT,
+    is_truncated INTEGER NOT NULL DEFAULT 0,
+    at TEXT NOT NULL,
+    UNIQUE(process_id, sequence)
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_stream_process ON agent_stream_events(process_id, sequence);
+  CREATE INDEX IF NOT EXISTS idx_agent_stream_id ON agent_stream_events(id);
   CREATE TABLE IF NOT EXISTS agent_health_checks (
     agent TEXT PRIMARY KEY,
     configured INTEGER NOT NULL,
@@ -303,6 +322,8 @@ ensureColumn('group_turns', 'before_head', 'TEXT');
 ensureColumn('group_turns', 'before_status', 'TEXT');
 ensureColumn('group_turns', 'after_head', 'TEXT');
 ensureColumn('group_turns', 'after_status', 'TEXT');
+ensureColumn('agent_processes', 'first_event_at', 'TEXT');
+ensureColumn('agent_processes', 'first_text_at', 'TEXT');
 
 setDefault('run_mode', 'hybrid');
 setDefault('max_concurrency', '3');
@@ -644,12 +665,162 @@ function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, 
   return id;
 }
 
-function touchAgentProcessOutput(id) {
-  if (!id) return;
-  const outputAt = now();
-  db.prepare("UPDATE agent_processes SET heartbeat_at = ?, last_output_at = ?, lease_expires_at = ? WHERE id = ? AND status = 'running'")
-    .run(outputAt, outputAt, leaseExpiry(), id);
-  broadcast('process', { id, status: 'running', lastOutputAt: outputAt });
+function truncateStreamValue(value, maxBytes = 32768) {
+  const text = redactSecrets(value == null ? '' : String(value));
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { value: text, truncated: false };
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(text.slice(0, middle), 'utf8') <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return { value: text.slice(0, low), truncated: true };
+}
+
+function streamEventFromRow(row) {
+  if (!row) return null;
+  const { detail_json: detailJson, is_truncated: isTruncated, ...event } = row;
+  return { ...event, detail: json(detailJson, null), isTruncated: Boolean(isTruncated) };
+}
+
+function listAgentStreamEvents({ after = 0, limit = 1000, processId = null, sessionId = null, taskId = null, runId = null } = {}) {
+  const clauses = ['e.id > ?'];
+  const params = [Math.max(0, Number(after) || 0)];
+  for (const [column, value] of [['e.process_id', processId], ['p.session_id', sessionId], ['p.task_id', taskId], ['p.run_id', runId]]) {
+    if (!value) continue;
+    clauses.push(`${column} = ?`);
+    params.push(value);
+  }
+  params.push(Math.max(1, Math.min(5000, Number(limit) || 1000)));
+  return db.prepare(`SELECT e.*, p.kind AS process_kind, p.entity_id, p.run_id, p.task_id, p.session_id, p.agent
+    FROM agent_stream_events e JOIN agent_processes p ON p.id = e.process_id
+    WHERE ${clauses.join(' AND ')} ORDER BY e.id ASC LIMIT ?`).all(...params).map(streamEventFromRow);
+}
+
+function listAgentProcessStreamEvents({ processId, after = 0, limit = 1000 }) {
+  const boundedLimit = Math.max(1, Math.min(5000, Number(limit) || 1000));
+  return db.prepare(`SELECT e.*, p.kind AS process_kind, p.entity_id, p.run_id, p.task_id, p.session_id, p.agent
+    FROM agent_stream_events e JOIN agent_processes p ON p.id = e.process_id
+    WHERE e.process_id = ? AND e.sequence > ? ORDER BY e.sequence ASC LIMIT ?`)
+    .all(processId, Math.max(0, Number(after) || 0), boundedLimit).map(streamEventFromRow);
+}
+
+function createAgentStreamRecorder(processId, onError = () => {}) {
+  let sequence = Number(db.prepare('SELECT COALESCE(MAX(sequence), 0) AS value FROM agent_stream_events WHERE process_id = ?').get(processId)?.value || 0);
+  let pending = [];
+  let timer = null;
+  const insert = db.prepare(`INSERT INTO agent_stream_events(
+    process_id, sequence, kind, stream, text_delta, tool_call_id, tool_name, summary, detail_json, is_truncated, at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+  const flush = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (!pending.length) return;
+    const batch = pending;
+    pending = [];
+    const persisted = [];
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const event of batch) {
+        const result = insert.run(
+          processId, event.sequence, event.kind, event.stream, event.textDelta || null, event.toolCallId || null,
+          event.toolName || null, event.summary || null, event.detailJson, event.isTruncated ? 1 : 0, event.at
+        );
+        persisted.push(streamEventFromRow({
+          id: Number(result.lastInsertRowid), process_id: processId, sequence: event.sequence, kind: event.kind,
+          stream: event.stream, text_delta: event.textDelta || null, tool_call_id: event.toolCallId || null,
+          tool_name: event.toolName || null, summary: event.summary || null, detail_json: event.detailJson,
+          is_truncated: event.isTruncated ? 1 : 0, at: event.at
+        }));
+      }
+      const timing = agentStreamBatchTiming(batch);
+      db.prepare(`UPDATE agent_processes SET
+        first_event_at = COALESCE(first_event_at, ?),
+        first_text_at = COALESCE(first_text_at, ?),
+        heartbeat_at = ?, last_output_at = COALESCE(?, last_output_at), lease_expires_at = ?
+        WHERE id = ? AND status = 'running'`).run(
+        timing.firstEventAt, timing.firstTextAt, batch[batch.length - 1].at, timing.lastOutputAt, leaseExpiry(), processId
+      );
+      db.exec('COMMIT');
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch {}
+      pending = [...batch, ...pending];
+      throw error;
+    }
+    for (const event of persisted) broadcast('agent_stream', event);
+  };
+
+  const record = (event, stream = 'stdout') => {
+    const at = now();
+    const text = truncateStreamValue(event.text || '');
+    const summary = truncateStreamValue(event.summary || '', 1000);
+    const serializedDetail = event.detail == null ? '' : redactSecrets(JSON.stringify(event.detail));
+    const detail = boundAgentStreamDetail(serializedDetail);
+    pending.push({
+      sequence: ++sequence,
+      kind: event.kind || 'status',
+      stream,
+      textDelta: text.value || null,
+      toolCallId: event.toolCallId || null,
+      toolName: event.toolName || null,
+      summary: summary.value || null,
+      detailJson: detail.json,
+      isTruncated: text.truncated || summary.truncated || detail.truncated,
+      countsForLatency: event.countsForLatency !== false,
+      at
+    });
+    if (pending.length >= 32 || pending.reduce((sum, item) => sum + Buffer.byteLength(item.textDelta || '', 'utf8'), 0) >= 8192) flush();
+    else if (!timer) {
+      timer = setTimeout(() => {
+        try { flush(); } catch (error) { onError(error); }
+      }, 100);
+      timer.unref?.();
+    }
+  };
+
+  return { record, flush };
+}
+
+function attachAgentStream({ child, processId, protocol = 'text', onChunk = null, onEvent = null }) {
+  let reportedError = false;
+  const reportError = error => {
+    if (reportedError) return;
+    reportedError = true;
+    const message = redactSecrets(error instanceof Error ? error.message : String(error));
+    console.error(`[agent-stream:${processId}] ${message}`);
+    broadcast('process', { id: processId, status: 'running', streamWarning: message, at: now() });
+  };
+  const recorder = createAgentStreamRecorder(processId, reportError);
+  recorder.record({ kind: 'status', summary: 'Agent process started', countsForLatency: false });
+  const parser = createAgentStreamParser({ protocol, onEvent: event => {
+    dispatchAgentStreamEvent(event, [value => recorder.record(value), onEvent], reportError);
+  } });
+  const receive = stream => data => {
+    dispatchAgentStreamEvent(data, [value => onChunk?.(stream, value), value => parser.push(stream, value.toString())], reportError);
+  };
+  const stdoutReceiver = receive('stdout');
+  const stderrReceiver = receive('stderr');
+  child.stdout.on('data', stdoutReceiver);
+  child.stderr.on('data', stderrReceiver);
+  let finished = false;
+  let finalText = '';
+  let unregister = () => {};
+  const finish = () => {
+    if (!finished) {
+      finished = true;
+      child.stdout.off('data', stdoutReceiver);
+      child.stderr.off('data', stderrReceiver);
+      dispatchAgentStreamEvent(null, [() => parser.end(), () => recorder.flush()], reportError);
+      finalText = parser.finalText();
+      unregister();
+    }
+    return finalText;
+  };
+  const controller = { finish, flush: finish };
+  unregister = agentStreamBuffers.register(controller);
+  return controller;
 }
 
 function finishAgentProcessRecord(id, { status, exitCode = null, reason = null, inputTokens = null, outputTokens = null, costUsd = null } = {}) {
@@ -677,6 +848,19 @@ function appendOutput(taskId, chunk, stream = 'stdout') {
   updateTask(taskId, { output: `${task.output || ''}${message}`.slice(-16000) });
   db.prepare('INSERT INTO task_logs(task_id, at, stream, message) VALUES (?, ?, ?, ?)').run(taskId, now(), stream, message);
   broadcast('log', { taskId, stream, message, at: now() });
+}
+
+function createTaskOutputBatcher(taskId, stream) {
+  const batcher = createTextBatcher({
+    onFlush: text => appendOutput(taskId, text, stream),
+    onError: error => console.error(`[task-output:${taskId}:${stream}] ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
+  });
+  const unregister = taskOutputBuffers.register(batcher);
+  return {
+    append: batcher.append,
+    flush: batcher.flush,
+    close() { try { batcher.flush(); } finally { unregister(); } }
+  };
 }
 
 function importLegacyState() {
@@ -1140,10 +1324,16 @@ async function writeHandoff(task) {
   await writeFile(join(handoffDir, `${task.id}.md`), `${handoff}\n`, 'utf8');
 }
 
-function recentGroupContext(sessionId) {
+function recentGroupContext(sessionId, phase) {
+  const limits = {
+    proposal: { totalChars: 0, perMessageChars: 1 },
+    critique: { totalChars: 20000, perMessageChars: 5000 },
+    convergence: { totalChars: 28000, perMessageChars: 6000 },
+    synthesis: { totalChars: 48000, perMessageChars: 8000 }
+  }[phase] || { totalChars: 24000, perMessageChars: 6000 };
+  if (!limits.totalChars) return '';
   const messages = db.prepare('SELECT round, sender_kind, sender_member_id, phase, content FROM group_messages WHERE session_id = ? ORDER BY id ASC').all(sessionId);
-  const text = messages.map(message => `[round ${message.round} / ${message.phase} / ${message.sender_member_id || message.sender_kind}]\n${message.content}`).join('\n\n');
-  return text.slice(-48000);
+  return buildBoundedGroupContext(messages, limits);
 }
 
 function groupTurnPrompt(session, member, round, phase) {
@@ -1162,7 +1352,7 @@ function groupTurnPrompt(session, member, round, phase) {
   return [
     `Group session: ${session.id}`, `Requirement: ${session.requirement}`, `Round: ${round}/${session.max_rounds}`, `Phase: ${phase}`,
     `You are ${member.displayName}, role ${member.role}.`, member.instructions ? `Responsibilities: ${member.instructions}` : '',
-    'Roster:', roster, '', objectives[phase], schema, '', 'Discussion so far:', recentGroupContext(session.id) || '(none)'
+    'Roster:', roster, '', objectives[phase], schema, '', 'Discussion so far:', recentGroupContext(session.id, phase) || '(none)'
   ].filter(Boolean).join('\n');
 }
 
@@ -1243,6 +1433,7 @@ async function runGroupTurn(session, member, round, phase) {
           }
         });
         let output = '';
+        let stream = null;
         let settled = false;
         let timedOut = false;
         const processId = startAgentProcessRecord({
@@ -1255,6 +1446,8 @@ async function runGroupTurn(session, member, round, phase) {
           settled = true;
           clearTimeout(timer);
           groupProcesses.delete(id);
+          const streamedText = stream?.finish() || '';
+          if (streamedText) output = streamedText;
           const cancelled = getGroupSession(session.id)?.status === 'cancelled';
           finishAgentProcessRecord(processId, {
             status: cancelled ? 'cancelled' : result.ok ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
@@ -1269,9 +1462,13 @@ async function runGroupTurn(session, member, round, phase) {
         releaseAgentSlot = null;
         db.prepare("UPDATE group_turns SET status = 'running', process_pid = ?, attempts = ?, started_at = ? WHERE id = ?").run(child.pid || null, attempt, now(), id);
         broadcast('group_turn', { id, sessionId: session.id, memberId: member.id, round, phase, status: 'running', attempt });
+        stream = attachAgentStream({
+          child,
+          processId,
+          protocol: adapter.streamProtocol || 'text',
+          onChunk: (_stream, data) => { output = `${output}${data}`.slice(-12000); }
+        });
         child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, pseudoTask, prompt, promptFile));
-        child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); touchAgentProcessOutput(processId); });
-        child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); touchAgentProcessOutput(processId); });
         child.once('error', error => finish({ ok: false, error, code: null }));
         child.once('close', code => finish({ ok: !timedOut && code === 0, code, error: timedOut ? new Error(`Group turn timed out after ${timeoutMs}ms.`) : null }));
       });
@@ -1497,13 +1694,18 @@ async function startTask(task, source = 'manual') {
       sessionId: roleAssignment?.session_id || null, agent: task.agent, child, command: adapter.command, args,
       timeoutMs, attempt: task.attempts, metadata: { source, stage: roleAssignment ? 'execute' : 'task' }
     });
+    const outputBatcher = createTaskOutputBatcher(task.id, 'agent');
+    const stream = attachAgentStream({
+      child,
+      processId,
+      protocol: adapter.streamProtocol || 'text',
+      onEvent: event => { if (event.kind === 'text_delta') outputBatcher.append(event.text); }
+    });
     const timer = setTimeout(() => { const entry = taskProcesses.get(task.id); if (entry) entry.timedOut = true; child.kill(); }, timeoutMs);
-    taskProcesses.set(task.id, { child, timer, timedOut: false, processId });
+    taskProcesses.set(task.id, { child, timer, timedOut: false, processId, stream, outputBatcher });
     releaseAgentSlot();
     updateTask(task.id, { process_pid: child.pid || null });
     child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, task, prompt));
-    child.stdout.on('data', data => { try { appendOutput(task.id, data.toString(), 'stdout'); touchAgentProcessOutput(processId); } catch {} });
-    child.stderr.on('data', data => { try { appendOutput(task.id, data.toString(), 'stderr'); touchAgentProcessOutput(processId); } catch {} });
     child.once('error', error => finishTaskProcess(task.id, child, { ok: false, error, code: null }).catch(() => {}));
     child.once('close', code => finishTaskProcess(task.id, child, { ok: code === 0, code }).catch(() => {}));
     return getTask(task.id);
@@ -1517,6 +1719,8 @@ async function finishTaskProcess(id, child, outcome) {
   if (!entry || entry.child !== child) return;
   clearTimeout(entry.timer);
   taskProcesses.delete(id);
+  entry.stream?.finish();
+  entry.outputBatcher?.close();
   const task = requireTask(id);
   const roleAssignment = getTaskRoleAssignment(id);
   if (task.status !== 'running') {
@@ -1663,6 +1867,7 @@ async function startReview(task) {
       env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: area, AOD_TASK_STAGE: 'conflict_review', AOD_TASK_FILES: JSON.stringify(task.files) }
     });
     let output = '';
+    let stream = null;
     const timeoutMs = Number(adapter.timeoutMs || config.defaults?.reviewTimeoutMs || 600000);
     let timedOut = false;
     const processId = startAgentProcessRecord({
@@ -1670,19 +1875,25 @@ async function startReview(task) {
       child, command: adapter.command, args: adapter.reviewArgs.map(value => expand(value, reviewTask, prompt)),
       timeoutMs, metadata: { worktree: area }
     });
+    stream = attachAgentStream({
+      child,
+      processId,
+      protocol: adapter.streamProtocol || 'text',
+      onChunk: (_stream, data) => { output = `${output}${data}`.slice(-24000); }
+    });
     const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
     reviewProcesses.set(review.id, { child, timer, area, finishing: false, processId });
     releaseAgentSlot();
     db.prepare('UPDATE reviews SET status = ?, reviewer_agent = ?, updated_at = ? WHERE id = ?').run('running', agent, now(), review.id);
     appendEvent('review', `${review.id} reviewer agent started`, task.id);
     child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, reviewTask, prompt));
-    child.stdout.on('data', data => { output = `${output}${data}`.slice(-24000); touchAgentProcessOutput(processId); });
-    child.stderr.on('data', data => { output = `${output}${data}`.slice(-24000); touchAgentProcessOutput(processId); });
     const finish = async (candidateStatus, outcome = {}) => {
       const active = reviewProcesses.get(review.id);
       if (!active || active.child !== child || active.finishing) return;
       active.finishing = true;
       clearTimeout(active.timer);
+      const streamedText = stream?.finish() || '';
+      if (streamedText) output = streamedText;
       let status = candidateStatus;
       if (status === 'suggested') {
         try {
@@ -1779,6 +1990,7 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
         env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: cwd, AOD_TASK_STAGE: stage, AOD_TASK_FILES: JSON.stringify(task.files), AOD_GROUP_SESSION_ID: session.id, AOD_GROUP_MEMBER_ID: member.id }
       });
       let output = '';
+      let stream = null;
       let settled = false;
       let timedOut = false;
       const assignment = getTaskRoleAssignment(task.id);
@@ -1787,11 +1999,15 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
         agent: member.agent, child, command: adapter.command, args, timeoutMs,
         attempt: Math.max(1, Number(assignment?.repair_count || 0) + 1), metadata: { memberId: member.id, stage }
       });
+      const outputBatcher = createTaskOutputBatcher(task.id, stage);
       const finish = (error, code) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         roleProcesses.delete(key);
+        const streamedText = stream?.finish() || '';
+        outputBatcher.close();
+        if (streamedText) output = streamedText;
         try { rm(promptFile, { force: true }); } catch {}
         const cancelled = getGroupSession(session.id)?.status === 'cancelled';
         finishAgentProcessRecord(processId, {
@@ -1809,9 +2025,13 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
       const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
       roleProcesses.set(key, { child, timer, sessionId: session.id, taskId: task.id, stage, processId });
       releaseAgentSlot();
+      stream = attachAgentStream({
+        child,
+        processId,
+        protocol: adapter.streamProtocol || 'text',
+        onEvent: event => { if (event.kind === 'text_delta') outputBatcher.append(event.text); }
+      });
       child.stdin.end(adapter.stdin === undefined ? undefined : expand(adapter.stdin, invocationTask, prompt, promptFile));
-      child.stdout.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); touchAgentProcessOutput(processId); });
-      child.stderr.on('data', data => { output = `${output}${data}`.slice(-12000); appendOutput(task.id, data.toString(), stage); touchAgentProcessOutput(processId); });
       child.once('error', error => finish(error, null));
       child.once('close', code => finish(null, code));
     });
@@ -2006,6 +2226,7 @@ async function planWithCodex(requirement, planner = 'codex', workspaceId = activ
       const id = `planner:${crypto.randomUUID()}`;
       const child = spawn(adapter.command, args, { cwd: workspaceRoot, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       let output = '';
+      let stream = null;
       let settled = false;
       let timedOut = false;
       const processId = startAgentProcessRecord({
@@ -2017,6 +2238,8 @@ async function planWithCodex(requirement, planner = 'codex', workspaceId = activ
         settled = true;
         clearTimeout(timer);
         plannerProcesses.delete(id);
+        const streamedText = stream?.finish() || '';
+        if (streamedText) output = streamedText;
         finishAgentProcessRecord(processId, {
           status: !error && !timedOut && code === 0 ? 'succeeded' : timedOut ? 'timed_out' : 'failed',
           exitCode: code,
@@ -2031,8 +2254,12 @@ async function planWithCodex(requirement, planner = 'codex', workspaceId = activ
       plannerProcesses.set(id, { child, timer, processId });
       releaseAgentSlot();
       releaseAgentSlot = null;
-      child.stdout.on('data', data => { output += data; touchAgentProcessOutput(processId); });
-      child.stderr.on('data', data => { output += data; touchAgentProcessOutput(processId); });
+      stream = attachAgentStream({
+        child,
+        processId,
+        protocol: adapter.streamProtocol || 'text',
+        onChunk: (_stream, data) => { output += data; }
+      });
       child.stdin.end(adapter.stdin === undefined ? undefined : String(adapter.stdin).replaceAll('{{prompt}}', prompt));
       child.once('error', error => finish(error, null));
       child.once('close', code => finish(null, code));
@@ -2363,6 +2590,19 @@ async function api(request, response, url) {
   if (workspaceSelectMatch && request.method === 'POST') return send(response, 200, await selectWorkspace(workspaceSelectMatch[1]));
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, publicState());
   if (request.method === 'GET' && url.pathname === '/api/processes') return send(response, 200, listAgentProcesses({ limit: url.searchParams.get('limit'), runId: url.searchParams.get('runId') }));
+  const processStreamMatch = url.pathname.match(/^\/api\/processes\/(AP-[a-f0-9-]+)\/stream$/i);
+  if (processStreamMatch && request.method === 'GET') {
+    if (!db.prepare('SELECT 1 FROM agent_processes WHERE id = ?').get(processStreamMatch[1])) return send(response, 404, { error: 'Agent process was not found.' });
+    return send(response, 200, listAgentProcessStreamEvents({
+      processId: processStreamMatch[1], after: url.searchParams.get('after'), limit: url.searchParams.get('limit')
+    }));
+  }
+  if (request.method === 'GET' && url.pathname === '/api/agent-stream') {
+    return send(response, 200, listAgentStreamEvents({
+      after: url.searchParams.get('after'), limit: url.searchParams.get('limit'), processId: url.searchParams.get('processId'),
+      sessionId: url.searchParams.get('sessionId'), taskId: url.searchParams.get('taskId'), runId: url.searchParams.get('runId')
+    }));
+  }
   if (request.method === 'GET' && url.pathname === '/api/metrics') return send(response, 200, processMetrics({ from: url.searchParams.get('from'), to: url.searchParams.get('to'), runId: url.searchParams.get('runId') }));
   if (request.method === 'GET' && url.pathname === '/api/github/status') return send(response, 200, await githubStatus());
   if (request.method === 'GET' && url.pathname === '/api/approvals') return send(response, 200, currentApprovals());
@@ -2417,6 +2657,7 @@ async function api(request, response, url) {
     return send(response, 202, startGithubLogin());
   }
   if (request.method === 'POST' && url.pathname === '/api/maintenance/backup') return send(response, 201, { path: await backupDatabase() });
+  if (request.method === 'POST' && url.pathname === '/api/maintenance/flush') return send(response, 200, flushRuntimeBuffers());
   if (request.method === 'POST' && url.pathname === '/api/maintenance/cleanup') return send(response, 200, { cleaned: await cleanupTerminalWorktrees() });
   if (request.method === 'POST' && url.pathname === '/api/runs/plan') {
     const payload = await body(request);
@@ -2528,7 +2769,7 @@ async function staticFile(response, pathname) {
   response.end(await readFile(path));
 }
 
-createServer(async (request, response) => {
+const httpServer = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) await api(request, response, url);
@@ -2539,7 +2780,39 @@ createServer(async (request, response) => {
       ...(error?.code ? { code: error.code } : {}),
     });
   }
-}).listen(port, '127.0.0.1', () => console.log(`AOD console is available at http://127.0.0.1:${port}`));
+});
+httpServer.listen(port, '127.0.0.1', () => console.log(`AOD console is available at http://127.0.0.1:${port}`));
+
+function flushRuntimeBuffers() {
+  return { agentStreams: agentStreamBuffers.flushAll(), taskOutputs: taskOutputBuffers.flushAll() };
+}
+
+let shutdownStarted = false;
+function shutdownDaemon(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  for (const response of eventStreams) response.end();
+  eventStreams.clear();
+  httpServer.close();
+  for (const processes of [taskProcesses, reviewProcesses, groupProcesses, roleProcesses, plannerProcesses]) {
+    for (const entry of processes.values()) {
+      try { entry.child?.kill(); } catch {}
+    }
+  }
+  const deadline = Date.now() + 2000;
+  const finish = () => {
+    if (currentProcessCount() > 0 && Date.now() < deadline) return setTimeout(finish, 25);
+    flushRuntimeBuffers();
+    for (const heartbeat of processHeartbeats.values()) clearInterval(heartbeat);
+    try { db.close(); } catch {}
+    process.exit(signal ? 0 : process.exitCode || 0);
+  };
+  setTimeout(finish, 25);
+}
+
+process.once('SIGINT', () => shutdownDaemon('SIGINT'));
+process.once('SIGTERM', () => shutdownDaemon('SIGTERM'));
+process.once('beforeExit', () => { flushRuntimeBuffers(); });
 
 setInterval(() => {
   Promise.all(listRuns().filter(run => run.status === 'published').map(refreshRunCi)).catch(() => {});

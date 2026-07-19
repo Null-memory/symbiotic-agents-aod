@@ -13,6 +13,34 @@ export function completedGroupTurnMemberIds(turns) {
     .map(turn => turn.member_id));
 }
 
+function compactMiddle(value, limit) {
+  const text = String(value || '');
+  if (text.length <= limit) return text;
+  const marker = '\n...[middle omitted]...\n';
+  if (limit <= marker.length + 2) return text.slice(-limit);
+  const available = limit - marker.length;
+  const head = Math.ceil(available * 0.55);
+  return `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`;
+}
+
+export function buildBoundedGroupContext(messages = [], { totalChars = 48000, perMessageChars = 8000 } = {}) {
+  const total = Math.max(0, Number(totalChars) || 0);
+  const perMessage = Math.max(1, Number(perMessageChars) || 1);
+  const blocks = [];
+  let used = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const sender = message.sender_member_id || message.sender_kind || 'unknown';
+    const header = `[round ${message.round} / ${message.phase} / ${sender}]\n`;
+    const block = `${header}${compactMiddle(message.content, perMessage)}`;
+    const separator = blocks.length ? 2 : 0;
+    if (used + separator + block.length > total) continue;
+    blocks.unshift(block);
+    used += separator + block.length;
+  }
+  return blocks.join('\n\n');
+}
+
 const KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/i;
 
 function requiredString(value, label) {

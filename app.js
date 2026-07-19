@@ -2,7 +2,7 @@ import { request, connectStream } from './ui/api.js';
 import { createStore } from './ui/state.js';
 import { createLayout } from './ui/layout.js';
 import { createRunCenter } from './ui/run-center.js';
-import { buildGroupTimelineItems, createGroupConsole } from './ui/group-console.js';
+import { buildGroupTimelineItems, createGroupConsole, latestAgentProcessEvents, loadAgentStreamPages, projectAgentStream } from './ui/group-console.js';
 import { createDialogs } from './ui/dialogs.js';
 import { createWorkspaceController } from './ui/workspaces.js';
 import { buildSearchIndex, searchEntities } from './ui/command-search.js';
@@ -48,6 +48,11 @@ let selectedGroupSessionId = null;
 let selectedGroupSession = null;
 let groupMessages = [];
 let groupMessagesAfter = 0;
+let groupStreamEvents = [];
+let groupStreamAfter = 0;
+let taskStreamEvents = [];
+let taskStreamAfter = 0;
+let taskStreamTaskId = null;
 let groupDetailRequest = 0;
 let groupConsoleOpen = false;
 let commandIndex = [];
@@ -198,14 +203,16 @@ function renderBoard() {
 function renderDetail() {
   const task = selectedTask();
   const taskHeaderActive = contextDock.getState().tab !== 'discussion';
-  if (!task) { if (taskHeaderActive) { $('#taskDetailTitle').textContent = '选择任务'; $('#taskDetailStatus').textContent = 'IDLE'; $('#taskDetailMeta').textContent = '从队列选择一个任务以查看运行记录。'; } $('#taskOutput').textContent = 'No task selected.'; $('#verificationResult').innerHTML = '<p class="empty">尚无验收结果。</p>'; $('#inspectorOverview').innerHTML = '<div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div>'; return; }
+  if (!task) { if (taskHeaderActive) { $('#taskDetailTitle').textContent = '选择任务'; $('#taskDetailStatus').textContent = 'IDLE'; $('#taskDetailMeta').textContent = '从队列选择一个任务以查看运行记录。'; } $('#taskOutput').textContent = 'No task selected.'; $('#taskStreamTools').innerHTML = ''; $('#verificationResult').innerHTML = '<p class="empty">尚无验收结果。</p>'; $('#inspectorOverview').innerHTML = '<div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div>'; return; }
   selectedTaskId = task.id;
   if (taskHeaderActive) {
     $('#taskDetailTitle').textContent = `${task.id} ${task.title}`;
     $('#taskDetailStatus').textContent = statusLabel(task.status);
     $('#taskDetailMeta').textContent = `${task.agent} | ${task.worktree || '尚未准备 worktree'} | ${task.branch}`;
   }
-  runCenterUi.setOutput(task.output || '等待 Agent 输出。');
+  const streamProjection = projectAgentStream(latestAgentProcessEvents(taskStreamTaskId === task.id ? taskStreamEvents : []));
+  runCenterUi.setOutput(streamProjection.text || task.output || '等待 Agent 输出。');
+  $('#taskStreamTools').innerHTML = renderAgentTools(streamProjection.tools);
   $('#verificationResult').innerHTML = task.verification ? `<span>验收：${escapeHtml(task.verification.command)}</span><b>${escapeHtml(task.verification.commit || '')}</b><pre>${escapeHtml(task.verification.output)}</pre>` : '';
   $('#inspectorOverview').innerHTML = `<dl class="task-overview-grid"><div><dt>Agent</dt><dd>${escapeHtml(task.agent)}</dd></div><div><dt>状态</dt><dd>${statusLabel(task.status)}</dd></div><div><dt>Commit</dt><dd>${shortCommit(task.verified_commit)}</dd></div><div><dt>分支</dt><dd>${escapeHtml(task.branch || '—')}</dd></div><div class="wide"><dt>绑定项目</dt><dd title="${escapeHtml(task.workspacePath || '')}">${escapeHtml(task.workspaceName || task.workspaceId || '—')}</dd></div><div class="wide"><dt>Worktree</dt><dd title="${escapeHtml(task.worktree || '')}">${escapeHtml(task.worktree || '尚未准备')}</dd></div><div class="wide"><dt>文件范围</dt><dd>${task.files.map(escapeHtml).join(', ')}</dd></div></dl><div class="inspector-actions">${taskActions(task) || '<span class="empty-inline">当前没有可执行操作</span>'}</div>`;
 }
@@ -320,6 +327,8 @@ function renderMetrics() {
     ['调用', summary.invocations, `${summary.active} ACTIVE`],
     ['成功率', formatPercent(summary.successRate), `${summary.succeeded}/${summary.terminal} TERMINAL`],
     ['超时率', formatPercent(summary.timeoutRate), `${summary.timedOut} TIMEOUT`],
+    ['首事件', formatDuration(summary.avgFirstEventMs), 'FIRST SIGNAL AVG'],
+    ['首正文', formatDuration(summary.avgFirstTextMs), 'FIRST TEXT AVG'],
     ['平均耗时', formatDuration(summary.avgDurationMs), 'TERMINAL AVG'],
     ['重试', summary.retries, `${summary.failed} FAILED`],
     ['槽位利用率', formatPercent(metrics.concurrency?.utilization), `PEAK ${metrics.concurrency?.peak || 0}/${metrics.concurrency?.capacity || state.maxConcurrency}`]
@@ -352,12 +361,15 @@ function renderProcessMonitor() {
     const finishedAt = Date.parse(item.finished_at || '') || Date.now();
     const recovery = item.recovery_state ? recoveryStateCopy[item.recovery_state] || item.recovery_state : '';
     const latestSignal = item.last_output_at || item.heartbeat_at;
+    const firstEventMs = Number.isFinite(startedAt) && item.first_event_at ? Math.max(0, Date.parse(item.first_event_at) - startedAt) : null;
+    const firstTextMs = Number.isFinite(startedAt) && item.first_text_at ? Math.max(0, Date.parse(item.first_text_at) - startedAt) : null;
     return `<article class="process-row status-${escapeHtml(item.status)}" title="${escapeHtml(item.id)}">
       <div class="process-identity"><span class="process-signal" aria-hidden="true"></span><div><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><small>${escapeHtml(processKindCopy[item.kind] || item.kind)}</small></div></div>
       <div class="process-entity"><span>ENTITY</span>${entity}</div>
       <div class="process-runtime"><span>PID / TRY</span><b>${item.pid || '—'} / ${item.attempt}</b></div>
-      <div class="process-timing"><span>HEARTBEAT / OUTPUT</span><b>${relativeAge(item.heartbeat_at)} / ${relativeAge(item.last_output_at)}</b></div>
-      <div class="process-outcome"><span class="status-pill">${escapeHtml(processStatusCopy[item.status] || item.status)}</span><b>${escapeHtml(recovery || formatDuration(Number.isFinite(startedAt) ? finishedAt - startedAt : 0))}</b>${item.terminal_reason ? `<small title="${escapeHtml(item.terminal_reason)}">${escapeHtml(item.terminal_reason)}</small>` : `<small>${escapeHtml(relativeAge(latestSignal))}</small>`}</div>
+      <div class="process-timing"><span>首事件 / 首正文</span><b>${firstEventMs === null ? '—' : formatDuration(firstEventMs)} / ${firstTextMs === null ? '—' : formatDuration(firstTextMs)}</b><small>${relativeAge(item.last_output_at)}</small></div>
+      <div class="process-outcome"><span class="status-pill">${escapeHtml(processStatusCopy[item.status] || item.status)}</span><b>${escapeHtml(recovery || formatDuration(Number.isFinite(startedAt) ? finishedAt - startedAt : 0))}</b>${item.terminal_reason ? `<small title="${escapeHtml(item.terminal_reason)}">${escapeHtml(item.terminal_reason)}</small>` : `<small>${escapeHtml(relativeAge(latestSignal))}</small>`}<button class="secondary compact" type="button" data-process-stream="${escapeHtml(item.id)}">查看流</button></div>
+      <div class="process-stream-detail" data-process-stream-detail="${escapeHtml(item.id)}" hidden></div>
     </article>`;
   }).join('');
 }
@@ -439,10 +451,21 @@ function renderGroupMembers() {
   }).join('');
 }
 
+function renderAgentTools(tools = []) {
+  if (!tools.length) return '';
+  return `<div class="agent-tool-list">${tools.map(tool => {
+    const detail = tool.details?.length ? JSON.stringify(tool.details, null, 2) : 'No persisted detail.';
+    return `<details class="agent-tool-event status-${escapeHtml(tool.status)}">
+      <summary><span>${escapeHtml(tool.toolName)}</span><strong>${escapeHtml(tool.summary)}</strong><small>${tool.status === 'completed' ? '完成' : '运行中'}</small></summary>
+      <pre>${escapeHtml(detail)}</pre>
+    </details>`;
+  }).join('')}</div>`;
+}
+
 function renderGroupMessages() {
   const container = $('#groupMessages');
   const stickToBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 90;
-  const timelineItems = buildGroupTimelineItems({ messages: groupMessages, turns: selectedGroupSession?.turns || [] });
+  const timelineItems = buildGroupTimelineItems({ messages: groupMessages, turns: selectedGroupSession?.turns || [], streamEvents: groupStreamEvents });
   if (!timelineItems.length) {
     const emptyCopy = selectedGroupSession?.status === 'draft' ? '讨论尚未启动。' : '正在准备讨论回合…';
     container.innerHTML = `<p class="empty">${emptyCopy}</p>`;
@@ -456,10 +479,14 @@ function renderGroupMessages() {
       running: '正在生成本轮内容，完成后将在这里显示完整回复。',
       recovery_required: '本回合需要人工恢复确认。'
     }[item.status] || statusLabel(item.status);
+    const streamedText = item.stream?.text || '';
+    const notice = item.stream?.notices?.at(-1)?.summary || statusCopy;
     return `<div class="group-message group-turn-progress status-${escapeHtml(item.status)}">
       <div class="group-message-meta"><strong>${escapeHtml(memberName(item.senderMemberId))}</strong><span>R${item.round} / ${escapeHtml(item.phase)}</span><time>${formatDuration(item.elapsedMs)}</time></div>
-      <div class="group-message-content">${escapeHtml(statusCopy)}</div>
-      <small>CLI 可能在退出前缓冲输出；回合状态仍会持续保留。</small>
+      <div class="group-stream-status">${escapeHtml(notice)}</div>
+      ${streamedText ? `<div class="group-message-content is-streaming">${escapeHtml(streamedText)}<span class="stream-caret" aria-hidden="true"></span></div>` : ''}
+      ${renderAgentTools(item.stream?.tools || [])}
+      <small>${streamedText ? '正文正在实时写入。' : '等待 Agent 返回首个正文或工具事件。'}</small>
     </div>`;
   }).join('');
   if (stickToBottom) container.scrollTop = container.scrollHeight;
@@ -638,19 +665,45 @@ async function refreshSelectedGroupSession(resetMessages = false) {
   const sessionId = selectedGroupSessionId;
   const requestId = ++groupDetailRequest;
   const after = resetMessages ? 0 : groupMessagesAfter;
-  const [session, messages] = await Promise.all([
+  const streamAfter = resetMessages ? 0 : groupStreamAfter;
+  const [session, messages, streamEvents] = await Promise.all([
     request(`/api/group-sessions/${sessionId}`),
-    request(`/api/group-sessions/${sessionId}/messages?after=${after}`)
+    request(`/api/group-sessions/${sessionId}/messages?after=${after}`),
+    loadAgentStreamPages((cursor, limit) => request(`/api/agent-stream?sessionId=${sessionId}&after=${cursor}&limit=${limit}`), { after: streamAfter })
   ]);
   if (requestId !== groupDetailRequest || sessionId !== selectedGroupSessionId) return;
   selectedGroupSession = session;
   selectedGroupId = session.group_id;
-  if (resetMessages) { groupMessages = []; groupMessagesAfter = 0; }
+  if (resetMessages) { groupMessages = []; groupMessagesAfter = 0; groupStreamEvents = []; groupStreamAfter = 0; }
   const known = new Set(groupMessages.map(message => message.id));
   for (const message of messages) if (!known.has(message.id)) groupMessages.push(message);
   groupMessages.sort((left, right) => left.id - right.id);
   groupMessagesAfter = groupMessages.length ? groupMessages[groupMessages.length - 1].id : 0;
+  const knownStreamEvents = new Set(groupStreamEvents.map(event => event.id));
+  for (const event of streamEvents) if (!knownStreamEvents.has(event.id)) groupStreamEvents.push(event);
+  groupStreamEvents.sort((left, right) => left.id - right.id);
+  groupStreamAfter = groupStreamEvents.length ? groupStreamEvents[groupStreamEvents.length - 1].id : 0;
   renderGroupConsole();
+}
+
+async function refreshSelectedTaskStream(reset = false) {
+  if (!selectedTaskId) return;
+  const taskId = selectedTaskId;
+  if (reset || taskStreamTaskId !== taskId) {
+    taskStreamTaskId = taskId;
+    taskStreamEvents = [];
+    taskStreamAfter = 0;
+  }
+  const events = await loadAgentStreamPages(
+    (cursor, limit) => request(`/api/agent-stream?taskId=${taskId}&after=${cursor}&limit=${limit}`),
+    { after: taskStreamAfter }
+  );
+  if (taskId !== selectedTaskId) return;
+  const known = new Set(taskStreamEvents.map(event => event.id));
+  for (const event of events) if (!known.has(event.id)) taskStreamEvents.push(event);
+  taskStreamEvents.sort((left, right) => left.id - right.id);
+  taskStreamAfter = taskStreamEvents.length ? taskStreamEvents[taskStreamEvents.length - 1].id : 0;
+  renderDetail();
 }
 
 async function openGroupSession(sessionId, groupId = null) {
@@ -659,6 +712,8 @@ async function openGroupSession(sessionId, groupId = null) {
   selectedGroupSession = null;
   groupMessages = [];
   groupMessagesAfter = 0;
+  groupStreamEvents = [];
+  groupStreamAfter = 0;
   groupConsoleOpen = true;
   contextDock.open('discussion', sessionId);
   groupConsoleUi.setActivePane('chat');
@@ -677,6 +732,7 @@ async function refresh({ includeGithub = true } = {}) {
       $('#githubStatus').classList.toggle('warning', !github.authenticated);
     }
     if (selectedGroupSessionId) await refreshSelectedGroupSession();
+    if (selectedTaskId) await refreshSelectedTaskStream();
   }
   catch (error) { tell(error.message, 'error'); }
 }
@@ -684,8 +740,13 @@ async function refresh({ includeGithub = true } = {}) {
 async function refreshFromStream(types) {
   const workspaceSnapshot = captureElementState($('#workspaceMain'));
   const dockSnapshot = captureElementState($('#contextDockViewport'), '#groupMessageInput', document.activeElement);
-  if (types.length && types.every(type => type === 'group_message') && selectedGroupSessionId) await refreshSelectedGroupSession();
-  else await refresh({ includeGithub: false });
+  const incrementalTypes = new Set(['group_message', 'group_turn', 'group_session', 'agent_stream']);
+  if (types.length && types.every(type => incrementalTypes.has(type)) && (selectedGroupSessionId || selectedTaskId)) {
+    await Promise.all([
+      selectedGroupSessionId ? refreshSelectedGroupSession() : Promise.resolve(),
+      selectedTaskId ? refreshSelectedTaskStream() : Promise.resolve()
+    ]);
+  } else await refresh({ includeGithub: false });
   restoreElementState($('#workspaceMain'), null, workspaceSnapshot);
   restoreElementState($('#contextDockViewport'), '#groupMessageInput', dockSnapshot);
 }
@@ -926,6 +987,25 @@ $('#approvalBoard').addEventListener('click', async event => {
 });
 
 $('#processMonitor').addEventListener('click', async event => {
+  const streamButton = event.target.closest('[data-process-stream]');
+  if (streamButton) {
+    const detail = document.querySelector(`[data-process-stream-detail="${CSS.escape(streamButton.dataset.processStream)}"]`);
+    if (!detail) return;
+    if (!detail.hidden) { detail.hidden = true; return; }
+    streamButton.disabled = true;
+    try {
+      const events = await loadAgentStreamPages(
+        (cursor, limit) => request(`/api/processes/${streamButton.dataset.processStream}/stream?after=${cursor}&limit=${limit}`),
+        { cursor: 'sequence' }
+      );
+      const projection = projectAgentStream(events);
+      const notices = projection.notices.map(item => `<span class="stream-notice status-${escapeHtml(item.kind)}">${escapeHtml(item.summary || item.kind)}</span>`).join('');
+      detail.innerHTML = `<div class="process-stream-notices">${notices}</div>${renderAgentTools(projection.tools)}<pre>${escapeHtml(projection.text || '尚无正文输出。')}</pre>`;
+      detail.hidden = false;
+    } catch (error) { tell(error.message, 'error'); }
+    finally { streamButton.disabled = false; }
+    return;
+  }
   const taskButton = event.target.closest('[data-process-task]');
   if (taskButton) {
     const task = state.tasks.find(item => item.id === taskButton.dataset.processTask);
@@ -935,6 +1015,7 @@ $('#processMonitor').addEventListener('click', async event => {
     layout.setRoute({ view: 'tasks', runId: task.run_id, taskId: task.id });
     renderBoard();
     renderDetail();
+    await refreshSelectedTaskStream(true);
     return;
   }
   const sessionButton = event.target.closest('[data-process-session]');
@@ -1118,7 +1199,7 @@ $('#taskForm').addEventListener('submit', async event => {
 });
 
 board.addEventListener('click', async event => {
-  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); contextDock.open('task', selectedTaskId); layout.setRoute({ view: 'tasks', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); return; }
+  const card = event.target.closest('[data-select]'); if (card && !event.target.closest('button,select')) { selectedTaskId = card.dataset.select; const task = state.tasks.find(item => item.id === selectedTaskId); contextDock.open('task', selectedTaskId); layout.setRoute({ view: 'tasks', runId: task?.run_id || null, taskId: selectedTaskId }); renderBoard(); renderDetail(); await refreshSelectedTaskStream(true); return; }
   const action = event.target.closest('[data-action]'); if (!action) return;
   try {
     const endpoint = { prepare: 'prepare', start: 'start', verify: 'verify', merge: 'merge', review: 'review' }[action.dataset.action];

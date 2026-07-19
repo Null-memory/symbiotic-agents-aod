@@ -151,7 +151,7 @@
             <section class="context-panel active" data-context-panel="task">
               <div class="inspector-tabs" role="tablist" aria-label="任务详情视图"><button class="active" type="button" role="tab" aria-selected="true" data-inspector-tab="overview">概览</button><button type="button" role="tab" aria-selected="false" data-inspector-tab="output">实时输出</button></div>
               <section class="inspector-panel active" data-inspector-panel="overview"><div class="inspector-overview" id="inspectorOverview"><div class="inspector-empty"><span>选择任务后显示 commit、worktree、依赖和可执行操作。</span></div></div></section>
-              <section class="inspector-panel" data-inspector-panel="output"><div class="log-toolbar"><input id="logSearch" type="search" placeholder="搜索输出" aria-label="搜索任务输出" /><label><input id="logFollow" type="checkbox" checked /> 自动跟随</label></div><pre class="terminal" id="taskOutput">No task selected.</pre></section>
+              <section class="inspector-panel" data-inspector-panel="output"><div class="log-toolbar"><input id="logSearch" type="search" placeholder="搜索输出" aria-label="搜索任务输出" /><label><input id="logFollow" type="checkbox" checked /> 自动跟随</label></div><div class="agent-tool-list task-stream-tools" id="taskStreamTools"></div><pre class="terminal" id="taskOutput">No task selected.</pre></section>
             </section>
             <section class="context-panel acceptance-context" data-context-panel="acceptance" hidden>
               <section class="acceptance-block"><div class="context-section-head"><span>ACCEPTANCE</span><strong>验收结果</strong></div><div class="verification" id="verificationResult"><p class="empty">尚无验收结果。</p></div></section>

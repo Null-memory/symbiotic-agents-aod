@@ -53,6 +53,20 @@ test('persists replacement completion across separate recovery requests', () => 
   assert.deepEqual([...completed], ['member-builder', 'member-critic', 'member-repair']);
 });
 
+test('bounds group context while preserving the newest member conclusions', () => {
+  assert.equal(typeof groupDomain.buildBoundedGroupContext, 'function');
+  const context = groupDomain.buildBoundedGroupContext([
+    { round: 1, phase: 'proposal', sender_member_id: 'old', content: `OLD-${'a'.repeat(90)}` },
+    { round: 1, phase: 'proposal', sender_member_id: 'middle', content: `MIDDLE-${'b'.repeat(90)}` },
+    { round: 2, phase: 'critique', sender_member_id: 'new', content: `NEW-${'c'.repeat(90)}-FINAL` },
+  ], { totalChars: 150, perMessageChars: 70 });
+
+  assert.equal(context.length <= 150, true);
+  assert.equal(context.includes('NEW-'), true);
+  assert.equal(context.includes('-FINAL'), true);
+  assert.equal(context.includes('OLD-'), false);
+});
+
 function validConsensusDraft(overrides = {}) {
   return {
     title: '  Release the group domain  ',

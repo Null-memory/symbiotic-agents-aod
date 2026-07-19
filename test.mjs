@@ -429,6 +429,17 @@ try {
   const messages = await api(`/api/group-sessions/${groupSession.id}/messages?after=0`);
   assert.equal(messages.filter(message => message.sender_kind === 'member').length, 10);
   assert.deepEqual([...new Set(messages.filter(message => message.round > 0).map(message => message.round))], [1, 2, 3]);
+  const sessionStream = await api(`/api/agent-stream?sessionId=${groupSession.id}&after=0`);
+  assert.equal(sessionStream.length > 0, true, 'Group discussion did not persist stream events.');
+  assert.equal(sessionStream.some(event => event.kind === 'text_delta' && event.text_delta), true);
+  assert.deepEqual(sessionStream.map(event => event.id), [...sessionStream.map(event => event.id)].sort((left, right) => left - right));
+  const groupProcess = (await api('/api/processes?limit=500')).find(process => process.session_id === groupSession.id);
+  assert.equal(Boolean(groupProcess), true);
+  const processStream = await api(`/api/processes/${groupProcess.id}/stream?after=0`);
+  assert.equal(processStream.every(event => event.process_id === groupProcess.id), true);
+  assert.equal(processStream.every((event, index) => index === 0 || event.sequence > processStream[index - 1].sequence), true);
+  assert.equal(processStream[0].summary, 'Agent process started');
+  assert.equal(groupProcess.first_event_at, processStream.find(event => event.sequence > 1)?.at, 'Synthetic process-start status must not count as the Agent first response.');
   const invalidRecovery = await apiFailure(`/api/group-turns/${discussed.turns[0].id}/recover`, { method: 'POST', body: JSON.stringify({ action: 'unknown' }) });
   assert.equal(invalidRecovery.error.includes('retry, skip, or replace'), true);
 
@@ -719,6 +730,14 @@ try {
   const processKinds = new Set(processHistory.map(item => item.kind));
   for (const kind of ['task', 'group_turn', 'role_execute', 'role_review', 'role_repair', 'conflict_review', 'planner']) {
     assert.equal(processKinds.has(kind), true, `Process ledger is missing ${kind}.`);
+    const process = processHistory.find(item => item.kind === kind);
+    const events = await api(`/api/processes/${process.id}/stream?after=0`);
+    assert.equal(events.length > 0, true, `Process stream is missing ${kind}.`);
+    assert.equal(events[0].kind, 'status', `${kind} did not persist an immediate start event.`);
+    if (events.length > 1) {
+      const incremental = await api(`/api/processes/${process.id}/stream?after=${events[0].sequence}`);
+      assert.deepEqual(incremental.map(event => event.sequence), events.slice(1).map(event => event.sequence), `${kind} process stream did not use a sequence cursor.`);
+    }
   }
   assert.equal(processHistory.some(item => item.task_id === timeout.id && item.status === 'timed_out'), true);
   assert.equal(processHistory.some(item => item.task_id === failed.id && item.status === 'failed' && item.exit_code === 7), true);

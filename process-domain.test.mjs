@@ -2,6 +2,126 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildProcessMetrics, classifyInterruptedProcess } from './process-domain.mjs';
+import * as processDomain from './process-domain.mjs';
+
+test('normalizes Codex JSONL into text, tool, and usage events across chunk boundaries', () => {
+  assert.equal(typeof processDomain.createAgentStreamParser, 'function');
+  const events = [];
+  const parser = processDomain.createAgentStreamParser({ protocol: 'codex-jsonl', onEvent: event => events.push(event) });
+
+  parser.push('stdout', '{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"git status","status":"in_progress"}}\n{"type":"item.comp');
+  parser.push('stdout', 'leted","item":{"id":"item_0","type":"command_execution","command":"git status","aggregated_output":"clean","exit_code":0,"status":"completed"}}\n');
+  parser.push('stdout', '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Repository is clean."}}\n{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":4}}\n');
+  parser.end();
+
+  assert.deepEqual(events.map(event => event.kind), ['tool_started', 'tool_completed', 'text_delta', 'usage']);
+  assert.equal(events[0].summary, 'git status');
+  assert.equal(events[1].detail.aggregated_output, 'clean');
+  assert.equal(events[2].text, 'Repository is clean.');
+  assert.deepEqual(events[3].detail, { input_tokens: 12, output_tokens: 4 });
+  assert.equal(parser.finalText(), 'Repository is clean.');
+});
+
+test('normalizes Claude partial text and expandable tool events', () => {
+  assert.equal(typeof processDomain.createAgentStreamParser, 'function');
+  const events = [];
+  const parser = processDomain.createAgentStreamParser({ protocol: 'claude-stream-json', onEvent: event => events.push(event) });
+
+  parser.push('stdout', [
+    JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'server.mjs' } } } }),
+    JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":' } } }),
+    JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Checking ' } } }),
+    JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'the server.' } } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'file contents' }] } }),
+  ].join('\n') + '\n');
+  parser.end();
+
+  assert.deepEqual(events.map(event => event.kind), ['tool_started', 'tool_progress', 'text_delta', 'text_delta', 'tool_completed']);
+  assert.equal(events[0].toolName, 'Read');
+  assert.deepEqual(events[0].detail.input, { file_path: 'server.mjs' });
+  assert.equal(events[1].toolCallId, 'tool-1');
+  assert.equal(events[1].toolName, 'Read');
+  assert.equal(events[4].summary, 'Read completed');
+  assert.equal(parser.finalText(), 'Checking the server.');
+});
+
+test('isolates stream consumer failures so later consumers still receive events', () => {
+  assert.equal(typeof processDomain.dispatchAgentStreamEvent, 'function');
+  const received = [];
+  const failures = [];
+  const event = { kind: 'text_delta', text: 'partial reply' };
+
+  processDomain.dispatchAgentStreamEvent(event, [
+    () => { throw new Error('task output unavailable'); },
+    value => received.push(value)
+  ], error => failures.push(error.message));
+
+  assert.deepEqual(received, [event]);
+  assert.deepEqual(failures, ['task output unavailable']);
+});
+
+test('bounds serialized stream detail including its truncation envelope', () => {
+  assert.equal(typeof processDomain.boundAgentStreamDetail, 'function');
+  const result = processDomain.boundAgentStreamDetail(JSON.stringify({ output: 'x'.repeat(40000) }), 32768);
+
+  assert.equal(result.truncated, true);
+  assert.equal(Buffer.byteLength(result.json, 'utf8') <= 32768, true);
+  assert.equal(JSON.parse(result.json).truncated, true);
+});
+
+test('does not treat synthetic process status as Agent output timing', () => {
+  assert.equal(typeof processDomain.agentStreamBatchTiming, 'function');
+  assert.deepEqual(processDomain.agentStreamBatchTiming([
+    { kind: 'status', at: '2026-07-19T05:00:00.000Z', countsForLatency: false }
+  ]), { firstEventAt: null, firstTextAt: null, lastOutputAt: null });
+  assert.deepEqual(processDomain.agentStreamBatchTiming([
+    { kind: 'status', at: '2026-07-19T05:00:00.000Z', countsForLatency: false },
+    { kind: 'tool_started', at: '2026-07-19T05:00:00.400Z', countsForLatency: true },
+    { kind: 'text_delta', at: '2026-07-19T05:00:01.200Z', countsForLatency: true }
+  ]), {
+    firstEventAt: '2026-07-19T05:00:00.400Z',
+    firstTextAt: '2026-07-19T05:00:01.200Z',
+    lastOutputAt: '2026-07-19T05:00:01.200Z'
+  });
+});
+
+test('batches rapid text deltas before writing task summaries', () => {
+  assert.equal(typeof processDomain.createTextBatcher, 'function');
+  const flushed = [];
+  const scheduled = [];
+  const batcher = processDomain.createTextBatcher({
+    onFlush: text => flushed.push(text),
+    maxBytes: 8,
+    schedule: callback => { scheduled.push(callback); return callback; },
+    cancel: () => {}
+  });
+
+  batcher.append('one');
+  batcher.append('two');
+  assert.deepEqual(flushed, []);
+  assert.equal(scheduled.length, 1);
+  batcher.append('!!');
+  assert.deepEqual(flushed, ['onetwo!!']);
+  batcher.append('tail');
+  batcher.flush();
+  assert.deepEqual(flushed, ['onetwo!!', 'tail']);
+});
+
+test('flushes every registered runtime buffer during graceful shutdown', () => {
+  assert.equal(typeof processDomain.createFlushRegistry, 'function');
+  const flushed = [];
+  const failures = [];
+  const registry = processDomain.createFlushRegistry({ onError: error => failures.push(error.message) });
+  const unregister = registry.register({ flush: () => flushed.push('stream') });
+  registry.register({ flush: () => { throw new Error('closed'); } });
+
+  assert.equal(registry.size, 2);
+  assert.equal(registry.flushAll(), 1);
+  assert.deepEqual(flushed, ['stream']);
+  assert.deepEqual(failures, ['closed']);
+  unregister();
+  assert.equal(registry.size, 1);
+});
 
 test('classifies interrupted process leases without reporting completion', () => {
   const at = '2026-07-18T10:00:00.000Z';
@@ -10,6 +130,17 @@ test('classifies interrupted process leases without reporting completion', () =>
   assert.equal(classifyInterruptedProcess({ status: 'running', pid: 100, lease_expires_at: '2026-07-18T10:00:10.000Z' }, { alive: true }, at), 'live');
   assert.equal(classifyInterruptedProcess({ status: 'running', pid: 101, lease_expires_at: '2026-07-18T09:59:59.000Z' }, { alive: true }, at), 'unverifiable');
   assert.equal(classifyInterruptedProcess({ status: 'running', pid: 102, lease_expires_at: '2026-07-18T10:00:10.000Z' }, { alive: null }, at), 'unverifiable');
+});
+
+test('measures first event and first text latency separately from total duration', () => {
+  const metrics = buildProcessMetrics([{
+    id: 'P-LATENCY', agent: 'codex', kind: 'planner', status: 'succeeded', attempt: 1,
+    started_at: '2026-07-18T10:00:00.000Z', first_event_at: '2026-07-18T10:00:00.250Z',
+    first_text_at: '2026-07-18T10:00:01.500Z', finished_at: '2026-07-18T10:00:05.000Z'
+  }], { from: '2026-07-18T09:59:59.000Z', to: '2026-07-18T10:00:06.000Z' });
+
+  assert.equal(metrics.summary.avgFirstEventMs, 250);
+  assert.equal(metrics.summary.avgFirstTextMs, 1500);
 });
 
 test('aggregates process outcomes, adapters, runs, failures, and concurrency', () => {
@@ -50,6 +181,8 @@ test('aggregates process outcomes, adapters, runs, failures, and concurrency', (
     successRate: 1 / 3,
     timeoutRate: 1 / 3,
     avgDurationMs: 10000 / 3,
+    avgFirstEventMs: 0,
+    avgFirstTextMs: 0,
     inputTokens: 100,
     outputTokens: 50,
     costUsd: 0.1
@@ -58,11 +191,13 @@ test('aggregates process outcomes, adapters, runs, failures, and concurrency', (
     {
       agent: 'claude-code', invocations: 2, terminal: 1, active: 1, succeeded: 0, failed: 1,
       timedOut: 0, retries: 0, successRate: 0, timeoutRate: 0, avgDurationMs: 2000,
+      avgFirstEventMs: 0, avgFirstTextMs: 0,
       inputTokens: 0, outputTokens: 0, costUsd: 0
     },
     {
       agent: 'codex', invocations: 2, terminal: 2, active: 0, succeeded: 1, failed: 0,
       timedOut: 1, retries: 1, successRate: 0.5, timeoutRate: 0.5, avgDurationMs: 4000,
+      avgFirstEventMs: 0, avgFirstTextMs: 0,
       inputTokens: 100, outputTokens: 50, costUsd: 0.1
     }
   ]);
@@ -81,4 +216,3 @@ test('aggregates process outcomes, adapters, runs, failures, and concurrency', (
     utilization: 0.6
   });
 });
-
