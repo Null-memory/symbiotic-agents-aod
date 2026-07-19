@@ -29,14 +29,14 @@ assert.equal(configExample.agents['claude-code'].args.includes('stream-json'), t
 assert.equal(configExample.planner?.streamProtocol, 'codex-jsonl', 'Planner must use the lightweight structured Codex profile.');
 assert.equal(configExample.planner?.args.includes('--ephemeral'), true, 'Planner must avoid persistent session startup work.');
 assert.equal(configExample.agents['claude-code'].discussionArgs.includes('--strict-mcp-config'), true, 'Claude discussion must avoid loading unrelated MCP servers.');
-assert.equal(configExample.agents.codex.args.includes('model_reasoning_effort="medium"'), true, 'Codex task execution must avoid inheriting an unnecessarily high global effort.');
+assert.equal(configExample.agents.codex.profileArgs.effort.includes('model_reasoning_effort="{{effort}}"'), true, 'Codex must expose a controlled effort argument template.');
+assert.equal(configExample.agents.codex.profiles['gpt-5.5'].model, 'gpt-5.5', 'Codex must expose a selectable model profile.');
 assert.equal(configExample.planner.args.includes('model_reasoning_effort="low"'), true, 'Planner must use the low-latency reasoning profile.');
 assert.equal(configExample.planner.args.includes('mcp_servers={}'), true, 'Planner must not initialize unrelated MCP servers.');
 assert.equal(configExample.agents['claude-code'].discussionArgs.includes('--safe-mode'), false, 'Portable defaults must preserve repository CLAUDE.md instructions.');
 assert.equal(configExample.agents.codex.discussionArgs.includes('--ignore-rules'), false, 'Portable defaults must preserve repository AGENTS.md instructions.');
-assert.equal(configExample.agents['claude-code'].discussionArgs.includes('low'), true, 'Claude discussion must use low effort.');
-assert.equal(configExample.agents['claude-code'].discussionArgs.includes('sonnet'), true, 'Claude discussion must use the latency-oriented Sonnet profile.');
-assert.equal(configExample.agents['claude-code'].reviewArgs.includes('medium'), true, 'Claude review must retain medium effort for quality.');
+assert.equal(configExample.agents['claude-code'].profileArgs.model.includes('{{model}}'), true, 'Claude must expose a controlled model argument template.');
+assert.equal(configExample.agents['claude-code'].profiles.sonnet.model, 'sonnet', 'Claude must expose a selectable model profile.');
 assert.deepEqual(configExample.agents.codex.health.requiredOptions, ['--json', '--ephemeral', '--disable'], 'Codex health must check options used by the structured adapter.');
 assert.deepEqual(configExample.agents['claude-code'].health.requiredOptions, ['--output-format', '--include-partial-messages', '--no-session-persistence', '--effort'], 'Claude health must catch older incompatible CLIs.');
 
@@ -125,8 +125,14 @@ for (const id of ['metricsBoard', 'processMonitor']) {
   assert.equal(html.includes(`id="${id}"`), true, `Process observability is missing #${id}.`);
 }
 assert.equal(html.includes('name="agent"'), true, 'Group seats need an adapter selector.');
+assert.equal(html.includes('name="profileKey"'), true, 'Group seats need a model profile selector.');
+assert.equal(html.includes('name="effort"'), true, 'Group seats need a reasoning effort selector.');
 assert.equal(html.includes('data-remove-group-member'), true, 'Group seats need an explicit remove control.');
 assert.equal(script.includes('createGroupMemberRow'), true, 'Group editor must render dynamic member rows.');
+assert.equal(script.includes('syncGroupProfileOptions'), true, 'Group editor must refresh model profiles when an adapter changes.');
+assert.equal(script.includes('agentProfiles'), true, 'Console must consume the adapter profile catalog.');
+assert.equal(script.includes('actual_model'), true, 'Process and group views must expose the actual runtime model.');
+assert.equal(script.includes('requested_model'), true, 'Process views must expose the requested model.');
 assert.equal(script.includes('nextGroupMemberKey'), true, 'New group seats need deterministic unique keys.');
 assert.equal(script.includes('data-agent-health'), true, 'Agent diagnostics need per-adapter check actions.');
 assert.equal(script.includes('renderAgentHealth'), true, 'Agent diagnostics need a state renderer.');

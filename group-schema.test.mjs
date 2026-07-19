@@ -43,6 +43,9 @@ test('migrates legacy group members to allow repeated adapters without weakening
   assert.equal(migrateAgentGroupMembers(db), true);
   assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM agent_group_members').get().count, 1);
+  const columns = db.prepare('PRAGMA table_info(agent_group_members)').all().map(column => column.name);
+  assert.equal(columns.includes('profile_key'), true);
+  assert.equal(columns.includes('effort'), true);
 
   db.prepare(`INSERT INTO agent_group_members
     (id, group_id, key, agent, role, display_name, instructions, position, enabled)

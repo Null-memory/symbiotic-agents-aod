@@ -191,11 +191,13 @@
         <div class="form-row"><label>群组名称<input name="name" required maxlength="80" placeholder="例如：交付评审组" /></label><label>讨论轮次<input name="maxRounds" type="number" value="3" readonly /></label></div>
         <label>群组描述<textarea name="description" maxlength="500" placeholder="说明群组负责的工作范围。"></textarea></label>
         <div class="group-member-editor-head"><div><p class="kicker">MEMBER SEATS</p><h3>成员席位</h3></div><button class="secondary compact" id="addGroupMember" type="button">添加席位</button></div>
-        <div class="group-member-editor-label"><span>本机 Agent</span><span>角色</span><span>显示名</span><span>职责说明</span><span>主持 / 操作</span></div>
+        <div class="group-member-editor-label"><span>本机 Agent</span><span>模型档案</span><span>推理强度</span><span>角色</span><span>显示名</span><span>职责说明</span><span>主持 / 操作</span></div>
         <div class="group-member-editor" id="groupMemberEditor"></div>
         <template id="groupMemberTemplate">
           <div class="group-member-edit-row" data-member-key="" data-key-auto="true">
             <label><span class="mobile-field-label">本机 Agent</span><select name="agent" aria-label="席位使用的本机 Agent"><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">反重力 2.0</option></select><small class="member-seat-key"></small></label>
+            <label><span class="mobile-field-label">模型档案</span><select name="profileKey" aria-label="席位使用的模型档案"></select></label>
+            <label><span class="mobile-field-label">推理强度</span><select name="effort" aria-label="席位使用的推理强度"><option value="">按阶段默认</option></select></label>
             <label><span class="mobile-field-label">角色</span><select name="role" aria-label="席位角色"><option value="executor">executor</option><option value="reviewer">reviewer</option><option value="fixer">fixer</option><option value="advisor">advisor</option></select></label>
             <label><span class="mobile-field-label">显示名</span><input name="displayName" maxlength="60" aria-label="席位显示名" /></label>
             <label><span class="mobile-field-label">职责说明</span><textarea name="instructions" rows="2" maxlength="500" aria-label="席位职责说明"></textarea></label>

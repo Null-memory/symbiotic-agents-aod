@@ -45,6 +45,18 @@ test('normalizes Claude partial text and expandable tool events', () => {
   assert.equal(parser.finalText(), 'Checking the server.');
 });
 
+test('reports the actual model announced by an agent runtime', () => {
+  const events = [];
+  const parser = processDomain.createAgentStreamParser({ protocol: 'claude-stream-json', onEvent: event => events.push(event) });
+  parser.push('stdout', `${JSON.stringify({ type: 'system', subtype: 'init', model: 'provider-mapped-model' })}\n`);
+  parser.end();
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, 'status');
+  assert.equal(events[0].actualModel, 'provider-mapped-model');
+  assert.match(events[0].summary, /provider-mapped-model/);
+});
+
 test('normalizes Codex and Claude usage fields for process metrics', () => {
   assert.equal(typeof processDomain.normalizeAgentUsage, 'function');
   assert.deepEqual(processDomain.normalizeAgentUsage({ input_tokens: 120, output_tokens: 30, cost_usd: 0.04 }), {

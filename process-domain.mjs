@@ -135,7 +135,13 @@ export function createAgentStreamParser({ protocol = 'text', onEvent = () => {} 
     } else if (record?.type === 'error' || record?.type === 'turn.failed') {
       emit({ kind: 'warning', summary: String(record.message || record.error?.message || 'Codex reported an error.'), detail: record });
     } else if (record?.type === 'thread.started' || record?.type === 'turn.started') {
-      emit({ kind: 'status', summary: record.type === 'thread.started' ? 'Codex session started' : 'Codex is working', detail: record });
+      const actualModel = record.model ?? record.model_name ?? record.modelName ?? null;
+      emit({
+        kind: 'status',
+        summary: actualModel ? `Codex ${actualModel}` : record.type === 'thread.started' ? 'Codex session started' : 'Codex is working',
+        detail: record,
+        actualModel: actualModel == null ? null : String(actualModel),
+      });
     }
   };
 
@@ -173,7 +179,15 @@ export function createAgentStreamParser({ protocol = 'text', onEvent = () => {} 
       emit({ kind: record.subtype === 'success' ? 'status' : 'warning', summary: record.subtype === 'success' ? 'Claude completed' : String(record.error || record.subtype || 'Claude failed'), detail: record });
       return;
     }
-    if (record?.type === 'system' && record.subtype === 'init') emit({ kind: 'status', summary: 'Claude session started', detail: record });
+    if (record?.type === 'system' && record.subtype === 'init') {
+      const actualModel = record.model == null ? null : String(record.model);
+      emit({
+        kind: 'status',
+        summary: actualModel ? `Claude session started with ${actualModel}` : 'Claude session started',
+        detail: record,
+        actualModel,
+      });
+    }
   };
 
   const parseLine = (stream, line) => {

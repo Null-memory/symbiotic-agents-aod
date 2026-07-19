@@ -90,7 +90,7 @@ function validKey(value, label) {
   return key;
 }
 
-export function validateGroupDraft(payload, supportedAgents) {
+export function validateGroupDraft(payload, supportedAgents, profileCatalog = null) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Group draft must be an object.');
 
   const name = requiredString(payload.name, 'Group name');
@@ -109,6 +109,15 @@ export function validateGroupDraft(payload, supportedAgents) {
     if (keys.has(key)) throw new Error(`Duplicate member key: ${key}`);
     if (!supported.has(agent)) throw new Error(`Member ${key} has an unsupported agent: ${agent}`);
     if (!GROUP_ROLES.includes(role)) throw new Error(`Member ${key} has an invalid role: ${role}`);
+    const profileKey = optionalString(member.profileKey ?? member.profile_key);
+    const effort = optionalString(member.effort);
+    const agentProfiles = profileCatalog?.[agent];
+    if (profileKey && (!agentProfiles || !agentProfiles.profiles?.some(profile => profile.key === profileKey))) {
+      throw new Error(`Member ${key} selected an unknown profile: ${profileKey}`);
+    }
+    if (effort && (!agentProfiles || !agentProfiles.efforts?.includes(effort))) {
+      throw new Error(`Member ${key} selected an unsupported effort: ${effort}`);
+    }
     keys.add(key);
     return {
       key,
@@ -116,6 +125,8 @@ export function validateGroupDraft(payload, supportedAgents) {
       role,
       displayName: optionalString(member.displayName),
       instructions: optionalString(member.instructions),
+      profileKey,
+      effort,
     };
   });
 

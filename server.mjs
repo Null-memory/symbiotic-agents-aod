@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { buildApprovalInbox } from './approval-domain.mjs';
+import { agentProfileCatalog, buildAgentInvocation, freezeAgentProfile } from './agent-profile-domain.mjs';
 import { acceptanceCommandGuidance, buildBoundedGroupContext, completedGroupTurnMemberIds, groupPhaseResponseGuidance, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
@@ -189,6 +190,10 @@ db.exec(`
     input_tokens INTEGER,
     output_tokens INTEGER,
     cost_usd REAL,
+    profile_key TEXT,
+    requested_model TEXT,
+    requested_effort TEXT,
+    actual_model TEXT,
     metadata_json TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_agent_processes_status ON agent_processes(status, started_at DESC);
@@ -243,6 +248,8 @@ db.exec(`
     role TEXT NOT NULL,
     display_name TEXT NOT NULL,
     instructions TEXT NOT NULL DEFAULT '',
+    profile_key TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT '',
     position INTEGER NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     UNIQUE(group_id, key)
@@ -324,6 +331,10 @@ ensureColumn('group_turns', 'after_head', 'TEXT');
 ensureColumn('group_turns', 'after_status', 'TEXT');
 ensureColumn('agent_processes', 'first_event_at', 'TEXT');
 ensureColumn('agent_processes', 'first_text_at', 'TEXT');
+ensureColumn('agent_processes', 'profile_key', 'TEXT');
+ensureColumn('agent_processes', 'requested_model', 'TEXT');
+ensureColumn('agent_processes', 'requested_effort', 'TEXT');
+ensureColumn('agent_processes', 'actual_model', 'TEXT');
 
 setDefault('run_mode', 'hybrid');
 setDefault('max_concurrency', '3');
@@ -471,15 +482,17 @@ function appendGroupMessage(sessionId, { turnId = null, round = 0, senderKind, s
   return Number(result.lastInsertRowid);
 }
 
-function createGroupSession(group, payload) {
+async function createGroupSession(group, payload) {
   if (typeof payload.requirement !== 'string' || !payload.requirement.trim()) throw new Error('A group session requires a natural-language requirement.');
   if (group.status !== 'active') throw new Error('Only active groups can create sessions.');
+  const config = await loadConfig();
   const id = `GS-${String(Number(db.prepare('SELECT COUNT(*) AS count FROM group_sessions').get().count) + 1).padStart(3, '0')}`;
   const createdAt = now();
   const workspaceId = activeWorkspace().id;
   const snapshot = group.members.filter(member => member.enabled).map(member => ({
     id: member.id, key: member.key, agent: member.agent, role: member.role, displayName: member.display_name,
-    instructions: member.instructions, isModerator: member.is_moderator
+    instructions: member.instructions, isModerator: member.is_moderator,
+    ...freezeAgentProfile(config.agents?.[member.agent] || {}, { profileKey: member.profile_key, effort: member.effort })
   }));
   db.prepare(`INSERT INTO group_sessions(id, group_id, requirement, member_snapshot_json, status, current_round, max_rounds, max_repairs, pause_requested, workspace_id, created_at, updated_at)
     VALUES (?, ?, ?, ?, 'draft', 0, ?, ?, 0, ?, ?, ?)`)
@@ -488,8 +501,10 @@ function createGroupSession(group, payload) {
   return requireGroupSession(id);
 }
 
-function createGroup(payload) {
-  const draft = validateGroupDraft(payload, agents);
+async function createGroup(payload) {
+  const config = await loadConfig();
+  const draft = validateGroupDraft(payload, agents, agentProfileCatalog(config));
+  draft.members.forEach(member => freezeAgentProfile(config.agents?.[member.agent] || {}, member));
   const id = `G-${String(Number(db.prepare('SELECT COUNT(*) AS count FROM agent_groups').get().count) + 1).padStart(3, '0')}`;
   const createdAt = now();
   db.exec('BEGIN');
@@ -499,8 +514,8 @@ function createGroup(payload) {
     let moderatorId = null;
     draft.members.forEach((member, position) => {
       const memberId = `${id}-M${position + 1}`;
-      db.prepare('INSERT INTO agent_group_members(id, group_id, key, agent, role, display_name, instructions, position, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)')
-        .run(memberId, id, member.key, member.agent, member.role, member.displayName || member.key, member.instructions, position);
+      db.prepare('INSERT INTO agent_group_members(id, group_id, key, agent, role, display_name, instructions, profile_key, effort, position, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)')
+        .run(memberId, id, member.key, member.agent, member.role, member.displayName || member.key, member.instructions, member.profileKey, member.effort, position);
       if (member.key === draft.moderatorKey) moderatorId = memberId;
     });
     db.prepare('UPDATE agent_groups SET moderator_member_id = ? WHERE id = ?').run(moderatorId, id);
@@ -513,14 +528,16 @@ function createGroup(payload) {
   return requireGroup(id);
 }
 
-function patchGroup(group, payload) {
-  const members = group.members.map(member => ({ key: member.key, agent: member.agent, role: member.role, displayName: member.display_name, instructions: member.instructions }));
+async function patchGroup(group, payload) {
+  const config = await loadConfig();
+  const members = group.members.map(member => ({ key: member.key, agent: member.agent, role: member.role, displayName: member.display_name, instructions: member.instructions, profileKey: member.profile_key, effort: member.effort }));
   const draft = validateGroupDraft({
     name: payload.name ?? group.name, description: payload.description ?? group.description,
     maxRounds: payload.maxRounds ?? group.max_rounds, maxRepairs: payload.maxRepairs ?? group.max_repairs,
     members: payload.members ?? members,
     moderatorKey: payload.moderatorKey ?? group.members.find(member => member.is_moderator)?.key
-  }, agents);
+  }, agents, agentProfileCatalog(config));
+  draft.members.forEach(member => freezeAgentProfile(config.agents?.[member.agent] || {}, member));
   db.exec('BEGIN');
   try {
     db.prepare('UPDATE agent_groups SET name = ?, description = ?, max_rounds = ?, max_repairs = ?, moderator_member_id = NULL, updated_at = ? WHERE id = ?')
@@ -529,8 +546,8 @@ function patchGroup(group, payload) {
     let moderatorId = null;
     draft.members.forEach((member, position) => {
       const memberId = `${group.id}-M${position + 1}`;
-      db.prepare('INSERT INTO agent_group_members(id, group_id, key, agent, role, display_name, instructions, position, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)')
-        .run(memberId, group.id, member.key, member.agent, member.role, member.displayName || member.key, member.instructions, position);
+      db.prepare('INSERT INTO agent_group_members(id, group_id, key, agent, role, display_name, instructions, profile_key, effort, position, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)')
+        .run(memberId, group.id, member.key, member.agent, member.role, member.displayName || member.key, member.instructions, member.profileKey, member.effort, position);
       if (member.key === draft.moderatorKey) moderatorId = memberId;
     });
     db.prepare('UPDATE agent_groups SET moderator_member_id = ? WHERE id = ?').run(moderatorId, group.id);
@@ -637,7 +654,7 @@ function processMetrics({ from = null, to = null, runId = null } = {}) {
 
 function leaseExpiry(at = Date.now()) { return new Date(at + processLeaseMs).toISOString(); }
 
-function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, sessionId = null, workspaceId = null, agent, child, command, args = [], timeoutMs, attempt = 1, metadata = {} }) {
+function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, sessionId = null, workspaceId = null, agent, child, command, args = [], timeoutMs, attempt = 1, profileKey = null, requestedModel = null, requestedEffort = null, metadata = {} }) {
   const id = `AP-${crypto.randomUUID()}`;
   const startedAt = now();
   const commandHash = createHash('sha256').update(JSON.stringify([command, args])).digest('hex');
@@ -646,10 +663,10 @@ function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, 
     || getSetting('active_workspace_id') || null;
   db.prepare(`INSERT INTO agent_processes(
     id, kind, entity_id, run_id, task_id, session_id, workspace_id, agent, status, pid, lease_owner, lease_expires_at,
-    heartbeat_at, started_at, timeout_ms, attempt, command_hash, metadata_json
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    heartbeat_at, started_at, timeout_ms, attempt, command_hash, profile_key, requested_model, requested_effort, metadata_json
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     id, kind, entityId, runId, taskId, sessionId, boundWorkspaceId, agent, child.pid || null, daemonLeaseOwner, leaseExpiry(),
-    startedAt, startedAt, timeoutMs, Math.max(1, Number(attempt) || 1), commandHash, JSON.stringify(metadata || {})
+    startedAt, startedAt, timeoutMs, Math.max(1, Number(attempt) || 1), commandHash, profileKey || null, requestedModel || null, requestedEffort || null, JSON.stringify(metadata || {})
   );
   const heartbeat = setInterval(() => {
     const heartbeatAt = now();
@@ -661,8 +678,15 @@ function startAgentProcessRecord({ kind, entityId, runId = null, taskId = null, 
   }, processHeartbeatMs);
   heartbeat.unref?.();
   processHeartbeats.set(id, heartbeat);
-  broadcast('process', { id, kind, entityId, taskId, sessionId, runId, agent, status: 'running', pid: child.pid || null, at: startedAt });
+  broadcast('process', { id, kind, entityId, taskId, sessionId, runId, agent, profileKey, requestedModel, requestedEffort, status: 'running', pid: child.pid || null, at: startedAt });
   return id;
+}
+
+function recordActualAgentModel(processId, actualModel) {
+  const model = actualModel == null ? '' : String(actualModel).trim();
+  if (!model) return;
+  db.prepare("UPDATE agent_processes SET actual_model = ? WHERE id = ? AND (actual_model IS NULL OR actual_model = '')").run(model, processId);
+  broadcast('process', { id: processId, actualModel: model, at: now() });
 }
 
 function truncateStreamValue(value, maxBytes = 32768) {
@@ -795,7 +819,10 @@ function attachAgentStream({ child, processId, protocol = 'text', onChunk = null
   const recorder = createAgentStreamRecorder(processId, reportError);
   recorder.record({ kind: 'status', summary: 'Agent process started', countsForLatency: false });
   const parser = createAgentStreamParser({ protocol, onEvent: event => {
-    dispatchAgentStreamEvent(event, [value => recorder.record(value), onEvent], reportError);
+    dispatchAgentStreamEvent(event, [value => {
+      recorder.record(value);
+      if (value.actualModel) recordActualAgentModel(processId, value.actualModel);
+    }, onEvent], reportError);
   } });
   const receive = stream => data => {
     dispatchAgentStreamEvent(data, [value => onChunk?.(stream, value), value => parser.push(stream, value.toString())], reportError);
@@ -1211,6 +1238,12 @@ function configuredAgentCommands() {
   return new Map(Object.entries(config?.agents || {}).map(([agent, adapter]) => [agent, typeof adapter?.command === 'string' ? adapter.command : null]));
 }
 
+function configuredAgentProfiles() {
+  if (!existsSync(configPath)) return {};
+  try { return agentProfileCatalog(json(readFileSync(configPath, 'utf8'), {})); }
+  catch { return {}; }
+}
+
 function listAgentHealth() {
   const configured = configuredAgentCommands();
   const saved = new Map(db.prepare('SELECT * FROM agent_health_checks').all().map(row => [row.agent, row]));
@@ -1434,7 +1467,8 @@ async function runGroupTurn(session, member, round, phase) {
       const before = await repositorySnapshot(workspaceRoot);
       db.prepare('UPDATE group_turns SET before_head = ?, before_status = ? WHERE id = ?').run(before.head, before.status, id);
       const pseudoTask = { id, worktree: workspaceRoot };
-      const args = argumentTemplate.map(value => expand(value, pseudoTask, prompt, promptFile));
+      const invocation = buildAgentInvocation(adapter, 'discussion', member);
+      const args = invocation.argumentTemplate.map(value => expand(value, pseudoTask, prompt, promptFile));
       const outcome = await new Promise(resolveTurn => {
         const child = spawn(adapter.command, args, {
           cwd: workspaceRoot, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
@@ -1455,7 +1489,8 @@ async function runGroupTurn(session, member, round, phase) {
         const processId = startAgentProcessRecord({
           kind: 'group_turn', entityId: id, runId: session.run_id, sessionId: session.id, agent: member.agent,
           child, command: adapter.command, args, timeoutMs, attempt,
-          metadata: { memberId: member.id, round, phase, workspaceRoot }
+          profileKey: invocation.profileKey, requestedModel: invocation.requestedModel, requestedEffort: invocation.requestedEffort,
+          metadata: { memberId: member.id, round, phase, workspaceRoot, profileLabel: invocation.profileLabel }
         });
         const finish = result => {
           if (settled) return;
@@ -1697,10 +1732,13 @@ async function startTask(task, source = 'manual') {
     const promptPath = join(handoffDir, `${task.id}.md`);
     if (!(await exists(promptPath))) throw new Error('The task handoff file is missing. Prepare the worktree again.');
     const prompt = await readFile(promptPath, 'utf8');
-    const args = adapter.args.map(value => expand(value, task, prompt));
+    const roleAssignment = getTaskRoleAssignment(task.id);
+    const roleSession = roleAssignment ? requireGroupSession(roleAssignment.session_id) : null;
+    const executor = roleSession?.members.find(member => member.id === roleAssignment.executor_member_id) || null;
+    const invocation = buildAgentInvocation(adapter, roleAssignment ? 'execute' : 'task', executor);
+    const args = invocation.argumentTemplate.map(value => expand(value, task, prompt));
     const timeoutMs = Math.max(1000, Number(adapter.timeoutMs || config.defaults.agentTimeoutMs || task.timeout_ms));
     const maxRetries = Math.max(0, Number(adapter.maxRetries ?? config.defaults.maxRetries ?? task.max_retries));
-    const roleAssignment = getTaskRoleAssignment(task.id);
     if (roleAssignment) updateTaskRoleAssignment(task.id, { stage: 'executing' });
     task = updateTask(task.id, { status: 'running', output: '', process_pid: null, attempts: task.attempts + 1, max_retries: maxRetries, timeout_ms: timeoutMs, started_at: now(), finished_at: null, recovery_note: null });
     appendEvent('agent', `${task.id} started ${task.agent} (${source})`, task.id);
@@ -1708,7 +1746,8 @@ async function startTask(task, source = 'manual') {
     const processId = startAgentProcessRecord({
       kind: roleAssignment ? 'role_execute' : 'task', entityId: task.id, runId: task.run_id, taskId: task.id,
       sessionId: roleAssignment?.session_id || null, agent: task.agent, child, command: adapter.command, args,
-      timeoutMs, attempt: task.attempts, metadata: { source, stage: roleAssignment ? 'execute' : 'task' }
+      timeoutMs, attempt: task.attempts, profileKey: invocation.profileKey, requestedModel: invocation.requestedModel, requestedEffort: invocation.requestedEffort,
+      metadata: { source, stage: roleAssignment ? 'execute' : 'task', profileLabel: invocation.profileLabel }
     });
     const outputBatcher = createTaskOutputBatcher(task.id, 'agent');
     const stream = attachAgentStream({
@@ -1878,7 +1917,9 @@ async function startReview(task) {
       `Task: ${task.id} ${task.title}`, `Worktree: ${area}`, 'Conflicted files:', ...review.conflictFiles.map(file => `- ${file}`),
       '', 'Return a concise rationale and one optional unified diff patch in a ```diff code fence. The operator will review and apply it manually.', '', review.conflict_diff
     ].join('\n');
-    const child = spawn(adapter.command, adapter.reviewArgs.map(value => expand(value, reviewTask, prompt)), {
+    const invocation = buildAgentInvocation(adapter, 'review', null);
+    const reviewArgs = invocation.argumentTemplate.map(value => expand(value, reviewTask, prompt));
+    const child = spawn(adapter.command, reviewArgs, {
       cwd: area, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, AOD_TASK_ID: task.id, AOD_WORKTREE: area, AOD_TASK_STAGE: 'conflict_review', AOD_TASK_FILES: JSON.stringify(task.files) }
     });
@@ -1888,8 +1929,9 @@ async function startReview(task) {
     let timedOut = false;
     const processId = startAgentProcessRecord({
       kind: 'conflict_review', entityId: review.id, runId: task.run_id, taskId: task.id, agent,
-      child, command: adapter.command, args: adapter.reviewArgs.map(value => expand(value, reviewTask, prompt)),
-      timeoutMs, metadata: { worktree: area }
+      child, command: adapter.command, args: reviewArgs, timeoutMs, profileKey: invocation.profileKey,
+      requestedModel: invocation.requestedModel, requestedEffort: invocation.requestedEffort,
+      metadata: { worktree: area, profileLabel: invocation.profileLabel }
     });
     stream = attachAgentStream({
       child,
@@ -1991,14 +2033,14 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
     const config = await loadConfig();
     const adapter = config.agents[member.agent];
     if (!adapter || typeof adapter.command !== 'string' || !Array.isArray(adapter.args)) throw new Error(`No ${member.agent} adapter is configured.`);
-    const argumentTemplate = stage === 'review' ? adapter.reviewArgs : adapter.args;
-    if (!Array.isArray(argumentTemplate)) throw new Error('Reviewer adapters require a dedicated reviewArgs array.');
+    if (stage === 'review' && !Array.isArray(adapter.reviewArgs)) throw new Error('Reviewer adapters require a dedicated reviewArgs array.');
+    const invocation = buildAgentInvocation(adapter, stage, member);
     const key = `${task.id}:${stage}`;
     const promptFile = join(cwd, `.aod-${stage}-prompt.md`);
     await writeFile(promptFile, `${prompt}\n`, 'utf8');
     checkCancelled();
     const invocationTask = { ...task, worktree: cwd };
-    const args = argumentTemplate.map(value => expand(value, invocationTask, prompt, promptFile));
+    const args = invocation.argumentTemplate.map(value => expand(value, invocationTask, prompt, promptFile));
     const timeoutMs = Math.max(1000, Number(adapter.roleTimeoutMs || config.defaults?.reviewTimeoutMs || adapter.timeoutMs || 600000));
     return await new Promise((resolveRole, rejectRole) => {
       const child = spawn(adapter.command, args, {
@@ -2013,7 +2055,9 @@ async function runRoleAdapter(task, member, stage, prompt, cwd) {
       const processId = startAgentProcessRecord({
         kind: `role_${stage}`, entityId: task.id, runId: task.run_id, taskId: task.id, sessionId: session.id,
         agent: member.agent, child, command: adapter.command, args, timeoutMs,
-        attempt: Math.max(1, Number(assignment?.repair_count || 0) + 1), metadata: { memberId: member.id, stage }
+        attempt: Math.max(1, Number(assignment?.repair_count || 0) + 1), profileKey: invocation.profileKey,
+        requestedModel: invocation.requestedModel, requestedEffort: invocation.requestedEffort,
+        metadata: { memberId: member.id, stage, profileLabel: invocation.profileLabel }
       });
       const outputBatcher = createTaskOutputBatcher(task.id, stage);
       const finish = (error, code) => {
@@ -2563,7 +2607,7 @@ function publicState() {
   return {
     workspace: selectedWorkspace.name, activeWorkspaceId: selectedWorkspace.id, workspaces: listWorkspaces(),
     mode: currentMode(), maxConcurrency: maxConcurrency(), integrationBranch: getSetting('integration_branch'),
-    agents, agentHealth: listAgentHealth(), approvals: currentApprovals(), metrics, statuses, transitions, tasks, runs, groups, groupSessions, reviews,
+    agents, agentProfiles: configuredAgentProfiles(), agentHealth: listAgentHealth(), approvals: currentApprovals(), metrics, statuses, transitions, tasks, runs, groups, groupSessions, reviews,
     events: db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 120').all().map(withWorkspaceIdentity),
     runtime: {
       activeAgents: currentProcessCount(), activeReviews: reviewProcesses.size, activeGroupTurns: groupProcesses.size,
@@ -2628,15 +2672,15 @@ async function api(request, response, url) {
   if (agentHealthMatch && request.method === 'POST') return send(response, 200, await checkAgentHealth(agentHealthMatch[1]));
   if (url.pathname === '/api/groups') {
     if (request.method === 'GET') return send(response, 200, listGroups());
-    if (request.method === 'POST') return send(response, 201, createGroup(await body(request)));
+    if (request.method === 'POST') return send(response, 201, await createGroup(await body(request)));
   }
   const groupSessionCreateMatch = url.pathname.match(/^\/api\/groups\/(G-\d+)\/sessions$/);
-  if (groupSessionCreateMatch && request.method === 'POST') return send(response, 201, createGroupSession(requireGroup(groupSessionCreateMatch[1]), await body(request)));
+  if (groupSessionCreateMatch && request.method === 'POST') return send(response, 201, await createGroupSession(requireGroup(groupSessionCreateMatch[1]), await body(request)));
   const groupArchiveMatch = url.pathname.match(/^\/api\/groups\/(G-\d+)\/archive$/);
   if (groupArchiveMatch && request.method === 'POST') return send(response, 200, archiveGroup(requireGroup(groupArchiveMatch[1])));
   const groupMatch = url.pathname.match(/^\/api\/groups\/(G-\d+)$/);
   if (groupMatch && request.method === 'GET') return send(response, 200, requireGroup(groupMatch[1]));
-  if (groupMatch && request.method === 'PATCH') return send(response, 200, patchGroup(requireGroup(groupMatch[1]), await body(request)));
+  if (groupMatch && request.method === 'PATCH') return send(response, 200, await patchGroup(requireGroup(groupMatch[1]), await body(request)));
   const groupSessionMatch = url.pathname.match(/^\/api\/group-sessions\/(GS-\d+)(?:\/(start|pause|resume|cancel|messages|confirm))?$/);
   if (groupSessionMatch) {
     const [, id, action] = groupSessionMatch;

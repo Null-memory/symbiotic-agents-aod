@@ -83,18 +83,28 @@ Copy-Item aod.config.example.json .aod.config.json
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-c", "model_reasoning_effort=\"medium\"", "-c", "notify=[]", "-"],
-      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-c", "model_reasoning_effort=\"low\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-c", "model_reasoning_effort=\"medium\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
+      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-c", "notify=[]", "-"],
+      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--disable", "plugins", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
+      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--disable", "plugins", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
+      "profiles": { "inherit": { "label": "跟随 Codex 配置", "model": "" }, "gpt-5.5": { "label": "GPT-5.5", "model": "gpt-5.5" } },
+      "defaultProfile": "inherit",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "profileDefaults": { "task": { "profileKey": "inherit", "effort": "medium" }, "discussion": { "profileKey": "inherit", "effort": "low" }, "review": { "profileKey": "inherit", "effort": "medium" }, "repair": { "profileKey": "inherit", "effort": "medium" } },
+      "profileArgs": { "model": ["-m", "{{model}}"], "effort": ["-c", "model_reasoning_effort=\"{{effort}}\""] },
       "stdin": "{{prompt}}",
       "streamProtocol": "codex-jsonl",
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
-      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--effort", "medium", "--permission-mode", "acceptEdits"],
-      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--safe-mode", "--model", "sonnet", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--effort", "low", "--permission-mode", "plan"],
-      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--safe-mode", "--model", "sonnet", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--effort", "medium", "--permission-mode", "plan"],
+      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--permission-mode", "acceptEdits"],
+      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "profiles": { "inherit": { "label": "跟随 Claude 配置", "model": "" }, "sonnet": { "label": "Sonnet", "model": "sonnet" }, "opus": { "label": "Opus", "model": "opus" } },
+      "defaultProfile": "inherit",
+      "efforts": ["low", "medium", "high"],
+      "profileDefaults": { "task": { "profileKey": "inherit", "effort": "medium" }, "discussion": { "profileKey": "inherit", "effort": "low" }, "review": { "profileKey": "inherit", "effort": "medium" }, "repair": { "profileKey": "inherit", "effort": "medium" } },
+      "profileArgs": { "model": ["--model", "{{model}}"], "effort": ["--effort", "{{effort}}"] },
       "stdin": "{{prompt}}",
       "streamProtocol": "claude-stream-json"
     }
@@ -121,6 +131,11 @@ Copy-Item aod.config.example.json .aod.config.json
 | `args` | Agent 可写执行参数 |
 | `discussionArgs` | 群组讨论的只读参数；缺省时只回退到 `reviewArgs` |
 | `reviewArgs` | 检查阶段的只读参数 |
+| `profiles` | 当前适配器可选的模型档案；每个档案包含显示名称和传给 CLI 的模型名 |
+| `defaultProfile` | 未单独选择席位模型时使用的默认档案 |
+| `efforts` | 当前适配器允许的推理强度列表 |
+| `profileDefaults` | 按 `task`、`discussion`、`review`、`repair` 阶段设置默认模型档案和推理强度 |
+| `profileArgs` | 将 `{{model}}`、`{{effort}}` 注入 CLI 参数的模板；不同 Agent 按自己的命令行语法配置 |
 | `stdin` | 通过标准输入传递给 CLI 的内容 |
 | `streamProtocol` | 输出协议：`codex-jsonl`、`claude-stream-json` 或 `text` |
 | `planner` | 可选的独立轻量规划器配置；缺省时使用同名 Agent 适配器 |
@@ -346,10 +361,11 @@ AOD 会创建：
 1. 点击“创建群组”。
 2. 输入群组名称和描述。
 3. 保留默认席位或点击“添加席位”；每个席位可选择 Codex、Claude Code 或 Antigravity。
-4. 为每个席位选择角色：`executor`、`reviewer`、`fixer` 或 `advisor`。
-5. 指定一名主持者。
-6. 设置最大修复次数。
-7. 保存群组。
+4. 在“模型档案”中为每个席位选择适配器配置的模型，在“推理强度”中选择该席位的强度；不同席位可以使用同一 Agent 的不同模型。
+5. 为每个席位选择角色：`executor`、`reviewer`、`fixer` 或 `advisor`。
+6. 指定一名主持者。
+7. 设置最大修复次数。
+8. 保存群组。创建会话时会冻结当时的模型档案；之后修改群组配置只影响新会话。
 
 约束：
 

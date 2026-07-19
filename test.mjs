@@ -9,7 +9,7 @@ const fixture = await mkdtemp(join(tmpdir(), 'aod-integration-'));
 const secondaryWorkspace = await mkdtemp(join(tmpdir(), 'aod-workspace-b-'));
 const secondaryNestedFolder = join(secondaryWorkspace, 'packages', 'demo');
 const port = 4928;
-const files = ['.gitignore', 'server.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {
@@ -147,8 +147,21 @@ try {
       streamProtocol: 'codex-jsonl'
     },
     agents: {
-      codex: { command: process.execPath, args: ['-e', fakeCodex], discussionArgs: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'], health: { versionArgs: ['--version'], capabilityArgs: ['-e', "console.log('--json --ephemeral')"], requiredOptions: ['--json', '--ephemeral'], authArgs: ['-e', "console.log('authenticated')"] } },
-      'claude-code': { command: process.execPath, args: ['-e', fakeClaude, '{{worktree}}'], discussionArgs: ['-e', fakeClaude, '{{worktree}}'], reviewArgs: ['-e', fakeClaude, '{{worktree}}'], timeoutMs: 75 },
+      codex: {
+        command: process.execPath, args: ['-e', fakeCodex], discussionArgs: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'],
+        profiles: { inherit: { label: 'Fixture default', model: '' }, focused: { label: 'Fixture focused', model: 'fixture-focused' } },
+        defaultProfile: 'inherit', efforts: ['low', 'medium', 'high'],
+        profileDefaults: { task: { profileKey: 'inherit', effort: 'medium' }, discussion: { profileKey: 'inherit', effort: 'low' }, review: { profileKey: 'inherit', effort: 'medium' }, repair: { profileKey: 'inherit', effort: 'medium' } },
+        profileArgs: { model: ['profile={{model}}'], effort: ['effort={{effort}}'] },
+        health: { versionArgs: ['--version'], capabilityArgs: ['-e', "console.log('--json --ephemeral')"], requiredOptions: ['--json', '--ephemeral'], authArgs: ['-e', "console.log('authenticated')"] }
+      },
+      'claude-code': {
+        command: process.execPath, args: ['-e', fakeClaude, '{{worktree}}'], discussionArgs: ['-e', fakeClaude, '{{worktree}}'], reviewArgs: ['-e', fakeClaude, '{{worktree}}'], timeoutMs: 75,
+        profiles: { inherit: { label: 'Fixture default', model: '' }, sonnet: { label: 'Fixture Sonnet', model: 'fixture-sonnet' } },
+        defaultProfile: 'inherit', efforts: ['low', 'medium', 'high'],
+        profileDefaults: { task: { profileKey: 'inherit', effort: 'medium' }, discussion: { profileKey: 'inherit', effort: 'low' }, review: { profileKey: 'inherit', effort: 'medium' }, repair: { profileKey: 'inherit', effort: 'medium' } },
+        profileArgs: { model: ['profile={{model}}'], effort: ['effort={{effort}}'] }
+      },
       antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], reviewArgs: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
     }
   }));
@@ -371,8 +384,8 @@ try {
     description: 'Discuss, implement, review, and repair delivery work.',
     moderatorKey: 'builder',
     members: [
-      { key: 'builder', agent: 'codex', role: 'executor', displayName: 'Builder', instructions: 'Own implementation decisions.' },
-      { key: 'inspector', agent: 'claude-code', role: 'reviewer', displayName: 'Inspector', instructions: 'Challenge assumptions and inspect changes.' },
+      { key: 'builder', agent: 'codex', role: 'executor', displayName: 'Builder', instructions: 'Own implementation decisions.', profileKey: 'focused', effort: 'high' },
+      { key: 'inspector', agent: 'claude-code', role: 'reviewer', displayName: 'Inspector', instructions: 'Challenge assumptions and inspect changes.', profileKey: 'sonnet', effort: 'medium' },
       { key: 'repairer', agent: 'antigravity', role: 'fixer', displayName: 'Repairer', instructions: 'Prepare minimal fixes when requested.' }
     ]
   }) });
@@ -381,6 +394,8 @@ try {
   assert.equal(group.max_repairs, 2);
   assert.equal(group.members.length, 3);
   assert.equal(group.members.find(member => member.key === 'builder').is_moderator, true);
+  assert.equal(group.members.find(member => member.key === 'builder').profile_key, 'focused');
+  assert.equal(group.members.find(member => member.key === 'builder').effort, 'high');
   assert.equal((await api('/api/groups')).some(item => item.id === group.id), true);
   assert.equal((await api(`/api/groups/${group.id}`)).members.length, 3);
   const renamedGroup = await api(`/api/groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ name: 'Delivery council v2' }) });
@@ -394,6 +409,14 @@ try {
     ]
   }) });
   assert.equal(invalidGroup.error.includes('reviewer'), true);
+  const invalidProfileGroup = await apiFailure('/api/groups', { method: 'POST', body: JSON.stringify({
+    name: 'Unknown model profile', moderatorKey: 'builder', maxRepairs: 0,
+    members: [
+      { key: 'builder', agent: 'codex', role: 'executor', profileKey: 'does-not-exist' },
+      { key: 'reviewer', agent: 'claude-code', role: 'reviewer' }
+    ]
+  }) });
+  assert.equal(invalidProfileGroup.error.includes('unknown profile'), true);
 
   const multiSeatGroup = await api('/api/groups', { method: 'POST', body: JSON.stringify({
     name: 'Three Claude perspectives',
@@ -422,6 +445,10 @@ try {
   assert.equal(groupSession.workspaceId, 'WS-001');
   assert.equal(groupSession.workspacePath, fixture);
   assert.equal(groupSession.status, 'draft');
+  const frozenBuilder = groupSession.members.find(member => member.key === 'builder');
+  assert.deepEqual({ profileKey: frozenBuilder.profileKey, profileLabel: frozenBuilder.profileLabel, model: frozenBuilder.model, effort: frozenBuilder.effort }, {
+    profileKey: 'focused', profileLabel: 'Fixture focused', model: 'fixture-focused', effort: 'high'
+  });
   await api(`/api/group-sessions/${groupSession.id}/start`, { method: 'POST', body: '{}' });
   const observedDiscussion = await observeGroupSessionConcurrency(groupSession.id);
   assert.equal(observedDiscussion.maximum <= 2, true, `Global agent concurrency reached ${observedDiscussion.maximum}; expected at most 2.`);
@@ -443,6 +470,9 @@ try {
   assert.deepEqual(sessionStream.map(event => event.id), [...sessionStream.map(event => event.id)].sort((left, right) => left - right));
   const groupProcess = (await api('/api/processes?limit=500')).find(process => process.session_id === groupSession.id);
   assert.equal(Boolean(groupProcess), true);
+  assert.equal(groupProcess.profile_key, 'focused');
+  assert.equal(groupProcess.requested_model, 'fixture-focused');
+  assert.equal(groupProcess.requested_effort, 'high');
   const processStream = await api(`/api/processes/${groupProcess.id}/stream?after=0`);
   assert.equal(processStream.every(event => event.process_id === groupProcess.id), true);
   assert.equal(processStream.every((event, index) => index === 0 || event.sequence > processStream[index - 1].sequence), true);

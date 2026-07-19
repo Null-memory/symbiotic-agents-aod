@@ -133,12 +133,38 @@ test('exports the supported group roles and normalizes a valid group', () => {
     maxRounds: 3,
     maxRepairs: 2,
     members: [
-      { key: 'builder', agent: 'codex', role: 'executor', displayName: 'Builder', instructions: 'Implement the agreed tasks.' },
-      { key: 'critic', agent: 'claude-code', role: 'reviewer', displayName: 'Critic', instructions: 'Review every acceptance result.' },
-      { key: 'repair', agent: 'antigravity', role: 'fixer', displayName: 'Repair', instructions: 'Repair rejected work.' },
+      { key: 'builder', agent: 'codex', role: 'executor', displayName: 'Builder', instructions: 'Implement the agreed tasks.', profileKey: '', effort: '' },
+      { key: 'critic', agent: 'claude-code', role: 'reviewer', displayName: 'Critic', instructions: 'Review every acceptance result.', profileKey: '', effort: '' },
+      { key: 'repair', agent: 'antigravity', role: 'fixer', displayName: 'Repair', instructions: 'Repair rejected work.', profileKey: '', effort: '' },
     ],
     moderatorKey: 'builder',
   });
+});
+
+test('validates a model profile and effort independently for every member seat', () => {
+  const catalog = {
+    codex: { defaultProfile: 'inherit', profiles: [{ key: 'inherit' }, { key: 'deep' }], efforts: ['low', 'high'] },
+    'claude-code': { defaultProfile: 'sonnet', profiles: [{ key: 'sonnet' }, { key: 'opus' }], efforts: ['low', 'medium'] },
+    antigravity: { defaultProfile: '', profiles: [], efforts: [] },
+  };
+  const members = validGroupDraft().members.map(member => ({ ...member }));
+  members[0].profileKey = 'deep';
+  members[0].effort = 'high';
+  members[1].profileKey = 'opus';
+  members[1].effort = 'medium';
+
+  const result = validateGroupDraft(validGroupDraft({ members }), supportedAgents, catalog);
+  assert.deepEqual(result.members.map(member => [member.key, member.profileKey, member.effort]), [
+    ['builder', 'deep', 'high'], ['critic', 'opus', 'medium'], ['repair', '', '']
+  ]);
+
+  const unknownProfile = members.map(member => ({ ...member }));
+  unknownProfile[0].profileKey = 'missing';
+  assert.throws(() => validateGroupDraft(validGroupDraft({ members: unknownProfile }), supportedAgents, catalog), /unknown profile/i);
+
+  const unknownEffort = members.map(member => ({ ...member }));
+  unknownEffort[1].effort = 'xhigh';
+  assert.throws(() => validateGroupDraft(validGroupDraft({ members: unknownEffort }), supportedAgents, catalog), /unsupported effort/i);
 });
 
 test('allows multiple seats backed by the same agent adapter', () => {

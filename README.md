@@ -45,7 +45,7 @@ npm start
 
 ## Agent 群组
 
-“Agent 群组”用于保存一套可重复使用的成员与职责配置。同一群组允许创建多个使用相同 Agent 适配器的独立席位，例如三个 Claude Code 会话；每个席位必须有唯一 key、显示名称和职责。成员角色包括执行者、检查者、修复者和顾问；主持者从现有成员中单独指定，因此可以兼任执行角色。
+“Agent 群组”用于保存一套可重复使用的成员、模型档案与职责配置。同一群组允许创建多个使用相同 Agent 适配器的独立席位，例如三个 Claude Code 会话；每个席位必须有唯一 key、显示名称、模型档案和职责。成员角色包括执行者、检查者、修复者和顾问；主持者从现有成员中单独指定，因此可以兼任执行角色。模型档案只允许使用 `.aod.config.json` 中为该适配器定义的选项。
 
 每个群组会话固定运行三轮：独立提案、交叉质询和方案收敛。主持者随后生成包含文件所有权、依赖、验收命令及角色分工的任务 DAG。操作者可以在控制台编辑 DAG，确认后才会创建运行和 worktree。
 
@@ -89,6 +89,8 @@ npm start
 - `{{prompt}}`：完整的任务交接文本，可作为单个 CLI 参数或 `stdin` 内容。
 
 调度器使用配置的命令和参数启动进程，将工作目录设为该任务 worktree，并把标准输出、标准错误保存到任务记录。不同版本的 Codex、Claude Code 与反重力 2.0 命令行参数可能不同，因此示例配置仅是结构模板。
+
+每个适配器可以定义 `profiles`、`defaultProfile`、`profileDefaults` 和 `profileArgs`。群组编辑器按席位选择模型档案和推理强度；创建会话时会冻结模型名称、档案标签和强度。任务执行、角色检查、角色修复与群组讨论都会使用对应席位的冻结配置；旧群组或普通任务没有席位配置时继续使用适配器默认值。进程观测同时记录 `requested_model` 和 Agent 初始化事件报告的 `actual_model`，用于识别代理或供应商的模型映射。
 
 `streamProtocol` 用于声明 CLI 输出协议：Codex 使用 `codex-jsonl`，Claude Code 使用 `claude-stream-json`，不支持结构化事件的适配器使用 `text`。AOD 将正文、工具调用、状态、告警和用量事件批量写入 SQLite，并通过 SSE 的 `agent_stream` 事件实时推送。刷新或断线后可通过 `GET /api/agent-stream?after=<global-id>` 分页恢复，也可用 `GET /api/processes/:id/stream?after=<sequence>` 查看单个进程。工具详情会脱敏并限制在 32KB；任务摘要日志按 100ms 或 8KB 批量写入，避免高频 token 回调拖慢 Agent。
 

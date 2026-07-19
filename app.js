@@ -366,7 +366,7 @@ function renderProcessMonitor() {
     const firstEventMs = Number.isFinite(startedAt) && item.first_event_at ? Math.max(0, Date.parse(item.first_event_at) - startedAt) : null;
     const firstTextMs = Number.isFinite(startedAt) && item.first_text_at ? Math.max(0, Date.parse(item.first_text_at) - startedAt) : null;
     return `<article class="process-row status-${escapeHtml(item.status)}" title="${escapeHtml(item.id)}">
-      <div class="process-identity"><span class="process-signal" aria-hidden="true"></span><div><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><small>${escapeHtml(processKindCopy[item.kind] || item.kind)}</small></div></div>
+      <div class="process-identity"><span class="process-signal" aria-hidden="true"></span><div><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><small>${escapeHtml(processKindCopy[item.kind] || item.kind)} / ${escapeHtml(item.actual_model ? `${item.requested_model || 'default'} → ${item.actual_model}` : item.requested_model || item.profile_key || 'CLI default')}</small></div></div>
       <div class="process-entity"><span>ENTITY</span>${entity}</div>
       <div class="process-runtime"><span>PID / TRY</span><b>${item.pid || '—'} / ${item.attempt}</b></div>
       <div class="process-timing"><span>首事件 / 首正文</span><b>${firstEventMs === null ? '—' : formatDuration(firstEventMs)} / ${firstTextMs === null ? '—' : formatDuration(firstTextMs)}</b><small>${relativeAge(item.last_output_at)}</small></div>
@@ -405,7 +405,7 @@ function renderGroups() {
   groupsBoard.innerHTML = groups.map(group => {
     const latest = latestGroupSession(group.id);
     const members = group.members || [];
-    const roster = members.map(member => `<span class="group-role"><b>${escapeHtml(member.display_name)}</b><i>${escapeHtml(roleLabels[member.role] || member.role)}</i>${member.is_moderator ? '<em>主持</em>' : ''}</span>`).join('');
+    const roster = members.map(member => `<span class="group-role"><b>${escapeHtml(member.display_name)}</b><i>${escapeHtml(roleLabels[member.role] || member.role)}</i><small>${escapeHtml(member.profile_key || 'CLI 默认')}</small>${member.is_moderator ? '<em>主持</em>' : ''}</span>`).join('');
     const latestCopy = latest
       ? `<div class="group-latest"><span>${escapeHtml(latest.id)} / ${statusLabel(latest.status)} ${workspaceBadge(latest)}</span><strong>ROUND ${latest.current_round}/${latest.max_rounds}</strong><p>${escapeHtml(latest.title || latest.requirement)}</p></div>`
       : '<div class="group-latest empty-session"><span>NO SESSION</span><p>尚未创建会话</p></div>';
@@ -445,10 +445,14 @@ function renderGroupMembers() {
   $('#groupMembers').innerHTML = members.map(member => {
     const memberTurns = turns.filter(turn => turn.member_id === member.id);
     const latestTurn = memberTurns[memberTurns.length - 1];
+    const latestProcess = latestTurn ? (state?.runtime?.processes || []).find(process => process.entity_id === latestTurn.id) : null;
+    const modelCopy = latestProcess?.actual_model
+      ? `${latestProcess.requested_model || member.model || 'CLI default'} → ${latestProcess.actual_model}`
+      : latestProcess?.requested_model || member.model || member.profileLabel || member.profileKey || 'CLI default';
     return `<div class="group-member-row">
       <span class="turn-signal status-${escapeHtml(latestTurn?.status || 'idle')}" aria-hidden="true"></span>
       <div><strong>${escapeHtml(member.displayName)}</strong><span>${escapeHtml(agentLabels[member.agent] || member.agent)}</span></div>
-      <div class="member-runtime"><b>${escapeHtml(roleLabels[member.role] || member.role)}${member.isModerator ? ' / 主持' : ''}</b><span>${latestTurn ? `R${latestTurn.round} ${escapeHtml(latestTurn.phase)} / ${statusLabel(latestTurn.status)}` : '等待发言'}</span></div>
+      <div class="member-runtime"><b>${escapeHtml(roleLabels[member.role] || member.role)}${member.isModerator ? ' / 主持' : ''}</b><span>${latestTurn ? `R${latestTurn.round} ${escapeHtml(latestTurn.phase)} / ${statusLabel(latestTurn.status)}` : '等待发言'}</span><small title="${escapeHtml(modelCopy)}">模型 ${escapeHtml(modelCopy)}</small></div>
     </div>`;
   }).join('');
 }
@@ -775,6 +779,21 @@ function nextGroupMemberKey(agent, excludedRow = null) {
   return key;
 }
 
+function syncGroupProfileOptions(row, member = {}) {
+  const agent = row.querySelector('[name="agent"]').value;
+  const catalog = state?.agentProfiles?.[agent] || { defaultProfile: '', profiles: [], efforts: [] };
+  const profileSelect = row.querySelector('[name="profileKey"]');
+  const effortSelect = row.querySelector('[name="effort"]');
+  const currentProfile = member.profileKey ?? member.profile_key ?? profileSelect.value;
+  const currentEffort = member.effort ?? effortSelect.value;
+  const profiles = catalog.profiles?.length ? catalog.profiles : [{ key: '', label: '适配器默认', model: null }];
+  profileSelect.innerHTML = profiles.map(profile => `<option value="${escapeHtml(profile.key)}">${escapeHtml(profile.label)}${profile.model ? ` / ${escapeHtml(profile.model)}` : ''}</option>`).join('');
+  profileSelect.value = profiles.some(profile => profile.key === currentProfile) ? currentProfile : catalog.defaultProfile || profiles[0].key;
+  const efforts = catalog.efforts?.length ? catalog.efforts : [];
+  effortSelect.innerHTML = `<option value="">按阶段默认</option>${efforts.map(effort => `<option value="${escapeHtml(effort)}">${escapeHtml(effort)}</option>`).join('')}`;
+  effortSelect.value = efforts.includes(currentEffort) ? currentEffort : '';
+}
+
 function createGroupMemberRow(member = {}, { moderator = false, autoKey = false } = {}) {
   const row = $('#groupMemberTemplate').content.firstElementChild.cloneNode(true);
   const agent = groupMemberDefaults[member.agent] ? member.agent : 'claude-code';
@@ -784,6 +803,8 @@ function createGroupMemberRow(member = {}, { moderator = false, autoKey = false 
   row.dataset.keyAuto = String(autoKey || !member.key);
   row.dataset.lastAgent = agent;
   row.querySelector('[name="agent"]').value = agent;
+  row.querySelector('[name="profileKey"]').value = member.profileKey ?? member.profile_key ?? '';
+  row.querySelector('[name="effort"]').value = member.effort ?? '';
   row.querySelector('[name="role"]').value = member.role || defaults.role;
   row.querySelector('[name="displayName"]').value = member.displayName ?? member.display_name ?? defaults.displayName;
   row.querySelector('[name="instructions"]').value = member.instructions ?? defaults.instructions;
@@ -791,6 +812,7 @@ function createGroupMemberRow(member = {}, { moderator = false, autoKey = false 
   const radio = row.querySelector('[name="moderatorKey"]');
   radio.value = key;
   radio.checked = moderator || member.isModerator || member.is_moderator || false;
+  syncGroupProfileOptions(row, member);
   return row;
 }
 
@@ -848,6 +870,8 @@ function readGroupForm() {
   const members = rows.map(row => ({
     key: row.dataset.memberKey,
     agent: row.querySelector('[name="agent"]').value,
+    profileKey: row.querySelector('[name="profileKey"]').value,
+    effort: row.querySelector('[name="effort"]').value,
     role: row.querySelector('[name="role"]').value,
     displayName: row.querySelector('[name="displayName"]').value.trim(),
     instructions: row.querySelector('[name="instructions"]').value.trim()
@@ -1040,6 +1064,7 @@ $('#groupMemberEditor').addEventListener('change', event => {
     const instructions = row.querySelector('[name="instructions"]');
     if (!displayName.value || displayName.value === previousDefaults?.displayName) displayName.value = nextDefaults.displayName;
     if (!instructions.value || instructions.value === previousDefaults?.instructions) instructions.value = nextDefaults.instructions;
+    syncGroupProfileOptions(row);
     row.dataset.lastAgent = nextAgent;
   }
   syncGroupMemberRows();
