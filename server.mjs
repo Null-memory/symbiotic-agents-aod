@@ -6,9 +6,9 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { buildApprovalInbox } from './approval-domain.mjs';
-import { buildBoundedGroupContext, completedGroupTurnMemberIds, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
+import { acceptanceCommandGuidance, buildBoundedGroupContext, completedGroupTurnMemberIds, groupPhaseResponseGuidance, recoveryTurnStatus, validateConsensusDraft, validateGroupDraft } from './group-domain.mjs';
 import { migrateAgentGroupMembers } from './group-schema.mjs';
-import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent } from './process-domain.mjs';
+import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
@@ -829,6 +829,11 @@ function finishAgentProcessRecord(id, { status, exitCode = null, reason = null, 
   if (heartbeat) clearInterval(heartbeat);
   processHeartbeats.delete(id);
   const finishedAt = now();
+  const usageRow = db.prepare("SELECT detail_json FROM agent_stream_events WHERE process_id = ? AND kind = 'usage' ORDER BY sequence DESC LIMIT 1").get(id);
+  const persistedUsage = normalizeAgentUsage(json(usageRow?.detail_json, {}));
+  inputTokens ??= persistedUsage.inputTokens;
+  outputTokens ??= persistedUsage.outputTokens;
+  costUsd ??= persistedUsage.costUsd;
   db.prepare(`UPDATE agent_processes SET status = ?, heartbeat_at = ?, lease_expires_at = ?,
     finished_at = ?, exit_code = ?, terminal_reason = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?
     WHERE id = ? AND status = 'running'`).run(
@@ -1288,6 +1293,15 @@ async function checkAgentHealth(agent) {
     base.auth_status = 'unknown';
     base.message = 'Executable is ready; authentication probe is not configured.';
 
+    if (health.capabilityArgs !== undefined || health.requiredOptions !== undefined) {
+      if (!Array.isArray(health.capabilityArgs)) throw new Error('health.capabilityArgs must be an array when capability checks are configured.');
+      if (!Array.isArray(health.requiredOptions)) throw new Error('health.requiredOptions must be an array when capability checks are configured.');
+      const capabilityResult = await run(adapter.command, health.capabilityArgs.map(String), root, timeoutMs);
+      const capabilityText = `${capabilityResult.stdout}\n${capabilityResult.stderr}`;
+      const missing = health.requiredOptions.map(String).filter(option => !capabilityText.includes(option));
+      if (missing.length) throw new Error(`Adapter CLI does not support configured options: ${missing.join(', ')}`);
+    }
+
     if (health.authArgs !== undefined) {
       if (!Array.isArray(health.authArgs)) throw new Error('health.authArgs must be an array.');
       try {
@@ -1336,7 +1350,7 @@ function recentGroupContext(sessionId, phase) {
   return buildBoundedGroupContext(messages, limits);
 }
 
-function groupTurnPrompt(session, member, round, phase) {
+function groupTurnPrompt(session, member, round, phase, allowedAcceptancePrefixes) {
   const objectives = {
     proposal: 'Propose a concrete implementation approach, responsibilities, risks, and acceptance criteria.',
     critique: 'Read the proposals, challenge assumptions, identify conflicts, and recommend corrections.',
@@ -1352,7 +1366,8 @@ function groupTurnPrompt(session, member, round, phase) {
   return [
     `Group session: ${session.id}`, `Requirement: ${session.requirement}`, `Round: ${round}/${session.max_rounds}`, `Phase: ${phase}`,
     `You are ${member.displayName}, role ${member.role}.`, member.instructions ? `Responsibilities: ${member.instructions}` : '',
-    'Roster:', roster, '', objectives[phase], schema, '', 'Discussion so far:', recentGroupContext(session.id, phase) || '(none)'
+    'Roster:', roster, '', objectives[phase], groupPhaseResponseGuidance(phase), acceptanceCommandGuidance(allowedAcceptancePrefixes), schema,
+    '', 'Discussion so far:', recentGroupContext(session.id, phase) || '(none)'
   ].filter(Boolean).join('\n');
 }
 
@@ -1401,7 +1416,8 @@ async function runGroupTurn(session, member, round, phase) {
     const workspaceRoot = workspace.git_root;
     const directory = join(aodDir, 'group-prompts', session.id, id);
     await mkdir(directory, { recursive: true });
-    const prompt = groupTurnPrompt(session, member, round, phase);
+    const allowedAcceptancePrefixes = config.security?.allowedAcceptancePrefixes || ['npm ', 'node ', 'pnpm ', 'yarn ', 'git ', 'python ', 'py '];
+    const prompt = groupTurnPrompt(session, member, round, phase, allowedAcceptancePrefixes);
     const promptFile = join(directory, 'prompt.md');
     await writeFile(promptFile, `${prompt}\n`, 'utf8');
     const timeoutMs = Math.max(1000, Number(adapter.groupTimeoutMs || config.defaults?.groupTurnTimeoutMs || adapter.timeoutMs || 600000));

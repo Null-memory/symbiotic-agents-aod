@@ -13,21 +13,21 @@
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-"],
-      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-c", "model_reasoning_effort=\"medium\"", "-c", "notify=[]", "-"],
+      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--disable", "plugins", "-c", "model_reasoning_effort=\"low\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
+      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--disable", "plugins", "-c", "model_reasoning_effort=\"medium\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
       "stdin": "{{prompt}}",
       "streamProtocol": "codex-jsonl",
-      "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
+      "health": { "versionArgs": ["--version"], "capabilityArgs": ["exec", "--help"], "requiredOptions": ["--json", "--ephemeral", "--disable"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
-      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--permission-mode", "acceptEdits"],
-      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
-      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--effort", "medium", "--permission-mode", "acceptEdits"],
+      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--model", "sonnet", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--effort", "low", "--permission-mode", "plan"],
+      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--model", "sonnet", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--effort", "medium", "--permission-mode", "plan"],
       "stdin": "{{prompt}}",
       "streamProtocol": "claude-stream-json",
-      "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
+      "health": { "versionArgs": ["--version"], "capabilityArgs": ["--help"], "requiredOptions": ["--output-format", "--include-partial-messages", "--no-session-persistence", "--effort"], "timeoutMs": 10000 }
     },
     "antigravity": {
       "command": "antigravity",
@@ -40,7 +40,7 @@
   },
   "planner": {
     "command": "codex",
-    "args": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+    "args": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--disable", "plugins", "-c", "model_reasoning_effort=\"low\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
     "stdin": "{{prompt}}",
     "streamProtocol": "codex-jsonl"
   }

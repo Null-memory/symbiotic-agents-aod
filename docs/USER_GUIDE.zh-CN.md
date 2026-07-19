@@ -83,25 +83,25 @@ Copy-Item aod.config.example.json .aod.config.json
   "agents": {
     "codex": {
       "command": "codex",
-      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-"],
-      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
-      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+      "args": ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "--disable", "plugins", "-c", "model_reasoning_effort=\"medium\"", "-c", "notify=[]", "-"],
+      "discussionArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-c", "model_reasoning_effort=\"low\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
+      "reviewArgs": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-c", "model_reasoning_effort=\"medium\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
       "stdin": "{{prompt}}",
       "streamProtocol": "codex-jsonl",
       "health": { "versionArgs": ["--version"], "timeoutMs": 10000 }
     },
     "claude-code": {
       "command": "claude",
-      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--permission-mode", "acceptEdits"],
-      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
-      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan"],
+      "args": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--no-chrome", "--no-session-persistence", "--effort", "medium", "--permission-mode", "acceptEdits"],
+      "discussionArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--safe-mode", "--model", "sonnet", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--effort", "low", "--permission-mode", "plan"],
+      "reviewArgs": ["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--safe-mode", "--model", "sonnet", "--no-chrome", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "Read,Glob,Grep,Bash", "--effort", "medium", "--permission-mode", "plan"],
       "stdin": "{{prompt}}",
       "streamProtocol": "claude-stream-json"
     }
   },
   "planner": {
     "command": "codex",
-    "args": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-"],
+    "args": ["exec", "--sandbox", "read-only", "--json", "--ephemeral", "--ignore-rules", "--disable", "plugins", "-c", "model_reasoning_effort=\"low\"", "-c", "mcp_servers={}", "-c", "notify=[]", "-"],
     "stdin": "{{prompt}}",
     "streamProtocol": "codex-jsonl"
   }
@@ -145,7 +145,19 @@ Copy-Item aod.config.example.json .aod.config.json
 - `GET /api/processes/<process-id>/stream?after=<sequence>` 使用该进程内部的 sequence 增量读取，和全局事件 ID 不混用。
 - 工具事件默认只显示简写摘要，展开后显示经过脱敏的详情；单条详情最多 32KB。
 - “首事件”统计 CLI 第一个真实状态或工具信号，“首正文”统计第一段回复。进程启动通知不计入这两项，也不计为 Agent 输出。
+- 运行指标同时累计输入/输出 token，并按适配器显示首正文耗时，用于区分上下文过大和模型生成过慢。
 - 任务摘要日志按 100ms 或 8KB 合并写入；实时界面仍直接消费 SSE，不会因此延迟。
+- 慢响应不会触发自动重启。失败和超时仍遵守任务自身恢复策略，但“尚未返回正文”本身不是重试条件。
+
+### 低延迟档位与实测
+
+- Codex：任务执行 `medium`，讨论/规划 `low`，检查 `medium`；讨论和规划不加载无关 MCP 或通知程序。
+- Claude Code：任务执行 `medium`；讨论固定 `sonnet + low`，检查固定 `sonnet + medium`。示例配置不使用 `safe-mode`，以保留仓库级 `CLAUDE.md`；确认项目不依赖仓库规则时，本机极速配置可开启 `safe-mode`。
+- 群组提案、质询和收敛每席最多 6 个要点、900 字符，禁止重复需求；综合回合保留完整结构化 JSON。
+- AOD 不复用 Codex `resume`：本机对比中第二轮首正文没有改善，输入从约 9K 增至约 18.7K，总耗时反而增加。
+- AOD 不启用 Codex `fast_mode`：当前本地模型供应商实测总耗时约 16 秒，明显慢于普通 low 档约 4.6 秒。
+- 2026-07-19 本机参考：规划器进程可见约 282ms、首事件约 826ms、首正文约 3.44s；三 Codex 席位完整十回合约 46.8s，并成功进入 DAG 人工确认。该数据是当前机器和供应商的参考，不是固定 SLA。
+- Agent 体检可在 `health.capabilityArgs` 配置本地帮助命令，并通过 `health.requiredOptions` 检查参数支持情况；旧版 CLI 会提前显示兼容性错误。
 
 ## 4. 启动 AOD
 

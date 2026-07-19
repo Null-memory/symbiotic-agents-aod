@@ -329,6 +329,8 @@ function renderMetrics() {
     ['超时率', formatPercent(summary.timeoutRate), `${summary.timedOut} TIMEOUT`],
     ['首事件', formatDuration(summary.avgFirstEventMs), 'FIRST SIGNAL AVG'],
     ['首正文', formatDuration(summary.avgFirstTextMs), 'FIRST TEXT AVG'],
+    ['输入 Token', Number(summary.inputTokens || 0).toLocaleString('en-US'), 'CONTEXT'],
+    ['输出 Token', Number(summary.outputTokens || 0).toLocaleString('en-US'), 'GENERATED'],
     ['平均耗时', formatDuration(summary.avgDurationMs), 'TERMINAL AVG'],
     ['重试', summary.retries, `${summary.failed} FAILED`],
     ['槽位利用率', formatPercent(metrics.concurrency?.utilization), `PEAK ${metrics.concurrency?.peak || 0}/${metrics.concurrency?.capacity || state.maxConcurrency}`]
@@ -338,7 +340,7 @@ function renderMetrics() {
     ? `<div class="metrics-adapters">${metrics.adapters.map(item => `<div class="metrics-adapter-row">
         <div><span class="agent-signal status-${item.active ? 'running' : item.failed || item.timedOut ? 'warning' : 'succeeded'}"></span><strong>${escapeHtml(agentLabels[item.agent] || item.agent)}</strong><small>${item.invocations} INVOCATIONS</small></div>
         <div class="metric-bar"><i style="--metric-fill:${Math.min(100, Math.max(0, Number(item.successRate) * 100))}%"></i><span>${formatPercent(item.successRate)} 成功</span></div>
-        <span><b>${formatPercent(item.timeoutRate)}</b> 超时</span><span><b>${formatDuration(item.avgDurationMs)}</b> 均耗</span><span><b>${item.retries}</b> 重试</span>
+        <span><b>${formatPercent(item.timeoutRate)}</b> 超时</span><span><b>${formatDuration(item.avgFirstTextMs)}</b> 首正文</span><span><b>${formatDuration(item.avgDurationMs)}</b> 均耗</span><span><b>${item.retries}</b> 重试</span>
       </div>`).join('')}</div>`
     : '<p class="empty">当前时间窗口没有适配器调用。</p>';
   board.innerHTML = summaryHtml + adapterHtml;

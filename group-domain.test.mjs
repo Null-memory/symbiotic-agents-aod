@@ -67,6 +67,18 @@ test('bounds group context while preserving the newest member conclusions', () =
   assert.equal(context.includes('OLD-'), false);
 });
 
+test('builds concise phase guidance and rejects flags-only acceptance wording', () => {
+  assert.equal(typeof groupDomain.groupPhaseResponseGuidance, 'function');
+  assert.equal(typeof groupDomain.acceptanceCommandGuidance, 'function');
+  assert.match(groupDomain.groupPhaseResponseGuidance('proposal'), /900 characters/);
+  assert.match(groupDomain.groupPhaseResponseGuidance('critique'), /900 characters/);
+  assert.match(groupDomain.groupPhaseResponseGuidance('synthesis'), /JSON only/);
+  const acceptance = groupDomain.acceptanceCommandGuidance(['npm ', 'node ', 'python ']);
+  assert.match(acceptance, /npm, node, python/);
+  assert.match(acceptance, /flags-only/i);
+  assert.match(acceptance, /node --check server\.mjs/);
+});
+
 function validConsensusDraft(overrides = {}) {
   return {
     title: '  Release the group domain  ',

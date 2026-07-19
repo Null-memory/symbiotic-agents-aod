@@ -29,6 +29,16 @@ assert.equal(configExample.agents['claude-code'].args.includes('stream-json'), t
 assert.equal(configExample.planner?.streamProtocol, 'codex-jsonl', 'Planner must use the lightweight structured Codex profile.');
 assert.equal(configExample.planner?.args.includes('--ephemeral'), true, 'Planner must avoid persistent session startup work.');
 assert.equal(configExample.agents['claude-code'].discussionArgs.includes('--strict-mcp-config'), true, 'Claude discussion must avoid loading unrelated MCP servers.');
+assert.equal(configExample.agents.codex.args.includes('model_reasoning_effort="medium"'), true, 'Codex task execution must avoid inheriting an unnecessarily high global effort.');
+assert.equal(configExample.planner.args.includes('model_reasoning_effort="low"'), true, 'Planner must use the low-latency reasoning profile.');
+assert.equal(configExample.planner.args.includes('mcp_servers={}'), true, 'Planner must not initialize unrelated MCP servers.');
+assert.equal(configExample.agents['claude-code'].discussionArgs.includes('--safe-mode'), false, 'Portable defaults must preserve repository CLAUDE.md instructions.');
+assert.equal(configExample.agents.codex.discussionArgs.includes('--ignore-rules'), false, 'Portable defaults must preserve repository AGENTS.md instructions.');
+assert.equal(configExample.agents['claude-code'].discussionArgs.includes('low'), true, 'Claude discussion must use low effort.');
+assert.equal(configExample.agents['claude-code'].discussionArgs.includes('sonnet'), true, 'Claude discussion must use the latency-oriented Sonnet profile.');
+assert.equal(configExample.agents['claude-code'].reviewArgs.includes('medium'), true, 'Claude review must retain medium effort for quality.');
+assert.deepEqual(configExample.agents.codex.health.requiredOptions, ['--json', '--ephemeral', '--disable'], 'Codex health must check options used by the structured adapter.');
+assert.deepEqual(configExample.agents['claude-code'].health.requiredOptions, ['--output-format', '--include-partial-messages', '--no-session-persistence', '--effort'], 'Claude health must catch older incompatible CLIs.');
 
 for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'inspectorResizeHandle']) {
   assert.equal(html.includes(`id="${id}"`), true, `Desktop shell is missing #${id}.`);
@@ -125,10 +135,14 @@ assert.equal(script.includes('renderMetrics'), true, 'Operational metrics need a
 assert.equal(script.includes('renderProcessMonitor'), true, 'Process monitor needs a state renderer.');
 assert.equal(script.includes('summary.avgFirstEventMs'), true, 'Operational metrics must expose time to first Agent event.');
 assert.equal(script.includes('summary.avgFirstTextMs'), true, 'Operational metrics must expose time to first Agent text.');
+assert.equal(script.includes('summary.inputTokens'), true, 'Operational metrics must expose total input context tokens.');
+assert.equal(script.includes('summary.outputTokens'), true, 'Operational metrics must expose total generated tokens.');
+assert.equal(script.includes('item.avgFirstTextMs'), true, 'Adapter rows must expose per-Agent first-text latency.');
 assert.equal(script.includes('item.first_event_at'), true, 'Process rows must expose individual first-event latency.');
 assert.equal(script.includes('recoveryStateCopy'), true, 'Process recovery states need explicit user-facing labels.');
 assert.equal(viewsCss.includes('.metrics-adapter-row'), true, 'Metrics need stable per-adapter rows.');
-assert.equal(viewsCss.includes('.metrics-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))'), true, 'Eight latency metrics need a balanced four-column desktop grid.');
+assert.equal(viewsCss.includes('.metrics-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr))'), true, 'Latency and token metrics need a balanced five-column desktop grid.');
+assert.equal(viewsCss.includes('.metric-cell:nth-child(5n),.metric-cell:nth-child(3){border-right:1px solid #354548}.metric-cell:nth-child(2n){border-right:0}'), true, 'Two-column metrics must restore borders removed by wider layouts.');
 assert.equal(viewsCss.includes('.process-row'), true, 'Process monitor needs stable process rows.');
 assert.equal(viewsCss.includes('-webkit-line-clamp:4'), true, 'Event summaries must not expand into full stack traces.');
 assert.equal(script.includes('data-approval-action'), true, 'Approval inbox needs explicit action controls.');

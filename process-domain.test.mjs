@@ -45,6 +45,33 @@ test('normalizes Claude partial text and expandable tool events', () => {
   assert.equal(parser.finalText(), 'Checking the server.');
 });
 
+test('normalizes Codex and Claude usage fields for process metrics', () => {
+  assert.equal(typeof processDomain.normalizeAgentUsage, 'function');
+  assert.deepEqual(processDomain.normalizeAgentUsage({ input_tokens: 120, output_tokens: 30, cost_usd: 0.04 }), {
+    inputTokens: 120, outputTokens: 30, costUsd: 0.04
+  });
+  assert.deepEqual(processDomain.normalizeAgentUsage({ inputTokens: 75, outputTokens: 25, total_cost_usd: 0.02 }), {
+    inputTokens: 75, outputTokens: 25, costUsd: 0.02
+  });
+  assert.deepEqual(processDomain.normalizeAgentUsage({
+    input_tokens: 20,
+    cache_creation_input_tokens: 100,
+    cache_read_input_tokens: 900,
+    output_tokens: 8
+  }), { inputTokens: 1020, outputTokens: 8, costUsd: null });
+  assert.deepEqual(processDomain.normalizeAgentUsage({}), { inputTokens: null, outputTokens: null, costUsd: null });
+});
+
+test('emits Claude result usage as a structured usage event', () => {
+  const events = [];
+  const parser = processDomain.createAgentStreamParser({ protocol: 'claude-stream-json', onEvent: event => events.push(event) });
+  parser.push('stdout', `${JSON.stringify({ type: 'result', subtype: 'success', result: 'Done.', usage: { input_tokens: 42, output_tokens: 7 }, total_cost_usd: 0.01 })}\n`);
+  parser.end();
+
+  assert.deepEqual(events.map(event => event.kind), ['text_delta', 'usage', 'status']);
+  assert.deepEqual(events[1].detail, { input_tokens: 42, output_tokens: 7, total_cost_usd: 0.01 });
+});
+
 test('isolates stream consumer failures so later consumers still receive events', () => {
   assert.equal(typeof processDomain.dispatchAgentStreamEvent, 'function');
   const received = [];

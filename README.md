@@ -94,9 +94,13 @@ npm start
 
 运行指标分别显示“首事件”和“首正文”：前者表示 CLI 首次返回真实状态或工具事件，后者表示首段可读回复；编排器自己的进程启动事件不参与统计。示例配置使用临时 Codex 会话、标准输入和独立轻量规划器，并关闭讨论阶段无关的 Claude 会话与 MCP 加载，以降低首次响应时间。
 
+示例的低延迟档位不会通过缩短超时或重启慢进程实现：Codex 任务使用 `medium`、讨论与规划使用 `low`、检查使用 `medium`；Claude 讨论使用 `sonnet + low`，检查使用 `sonnet + medium`。示例配置保留仓库级 `AGENTS.md/CLAUDE.md` 规则；若确认项目不依赖这些规则，本机极速配置可以额外使用 Codex `--ignore-rules` 和 Claude `--safe-mode`，换取更快启动。群组前三轮限制重复陈述并给出 900 字符回复预算，综合回合保留完整 JSON。实测中 Codex `resume` 会让第二轮输入 token 近乎翻倍，当前供应商的 `fast_mode` 也更慢，因此两者均不启用。
+
 群组讨论在会话绑定项目的 Git 根目录运行，因此 Agent 可以读取真实代码上下文。讨论优先使用只读 `discussionArgs`，缺省时只回退到 `reviewArgs`，绝不会使用普通任务的可写 `args`。AOD 在每个回合前后比较 HEAD 和完整 porcelain 状态；检测到变化时冻结会话为 `recovery_required`，保留现场且不会自动 reset、checkout 或删除文件。检查者仍必须配置只读 `reviewArgs`，并在检查结束后验证 detached worktree 的提交和文件状态未变化。`defaults.groupTurnTimeoutMs` 控制单个讨论回合超时；检查和修复默认沿用 `defaults.reviewTimeoutMs`。群组讨论、任务执行、角色检查和冲突 Reviewer 共用全局并发槽位。
 
 验收命令默认仅允许 `npm`、`node`、`pnpm`、`yarn`、`git`、`python` 和 `py` 前缀。可在 `security.allowedAcceptancePrefixes` 调整。常见令牌会从结构化日志和验收输出中脱敏。
+
+Agent 体检除了版本和认证，还可以按 `health.capabilityArgs` 执行本地帮助命令，并用 `health.requiredOptions` 检查当前 CLI 是否支持配置中使用的参数；因此旧版 CLI 会在启动任务前显示兼容性错误，不会等到群组回合才失败。
 
 ## GitHub 交付
 

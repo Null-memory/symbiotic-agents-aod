@@ -41,6 +41,24 @@ export function buildBoundedGroupContext(messages = [], { totalChars = 48000, pe
   return blocks.join('\n\n');
 }
 
+export function groupPhaseResponseGuidance(phase) {
+  if (phase === 'synthesis') {
+    return 'Return JSON only. Keep summaries, decisions, disagreements, and risks concise; include no fields outside the required schema.';
+  }
+  const focus = {
+    proposal: 'Do not restate the requirement or emit a final DAG.',
+    critique: 'Challenge only material assumptions; do not repeat proposals or emit a final DAG.',
+    convergence: 'State only resolved decisions, assignments, dependencies, and verification.'
+  }[phase] || 'Keep only decisions that advance the discussion.';
+  return `Response budget: at most 6 bullets and 900 characters. ${focus}`;
+}
+
+export function acceptanceCommandGuidance(prefixes = []) {
+  const commands = prefixes.map(prefix => String(prefix).trim()).filter(Boolean);
+  const allowed = commands.length ? commands.join(', ') : 'npm, node, pnpm, yarn, git, python, py';
+  return `Acceptance must be a complete executable command starting with one of: ${allowed}. A flags-only value is invalid; for example, normalize "--check server.mjs" to "node --check server.mjs".`;
+}
+
 const KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/i;
 
 function requiredString(value, label) {

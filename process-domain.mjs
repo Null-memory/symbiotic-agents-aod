@@ -87,6 +87,19 @@ export function createFlushRegistry({ onError = () => {} } = {}) {
   };
 }
 
+export function normalizeAgentUsage(detail = {}) {
+  const finite = value => value !== null && value !== undefined && Number.isFinite(Number(value)) ? Number(value) : null;
+  const directInput = finite(detail.input_tokens ?? detail.inputTokens);
+  const cacheCreation = finite(detail.cache_creation_input_tokens ?? detail.cacheCreationInputTokens);
+  const cacheRead = finite(detail.cache_read_input_tokens ?? detail.cacheReadInputTokens);
+  const inputParts = [directInput, cacheCreation, cacheRead].filter(value => value !== null);
+  return {
+    inputTokens: inputParts.length ? inputParts.reduce((total, value) => total + value, 0) : null,
+    outputTokens: finite(detail.output_tokens ?? detail.outputTokens),
+    costUsd: finite(detail.cost_usd ?? detail.costUsd ?? detail.total_cost_usd)
+  };
+}
+
 function eventSummary(item = {}) {
   if (item.command) return String(item.command);
   if (item.name) return String(item.name);
@@ -154,6 +167,9 @@ export function createAgentStreamParser({ protocol = 'text', onEvent = () => {} 
     }
     if (record?.type === 'result') {
       if (!text && typeof record.result === 'string') emitText(record.result);
+      if (record.usage || record.total_cost_usd !== undefined) {
+        emit({ kind: 'usage', summary: 'Token usage', detail: { ...(record.usage || {}), ...(record.total_cost_usd !== undefined ? { total_cost_usd: record.total_cost_usd } : {}) } });
+      }
       emit({ kind: record.subtype === 'success' ? 'status' : 'warning', summary: record.subtype === 'success' ? 'Claude completed' : String(record.error || record.subtype || 'Claude failed'), detail: record });
       return;
     }

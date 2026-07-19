@@ -143,10 +143,11 @@ try {
     defaults: { maxRetries: 0 },
     planner: {
       command: process.execPath,
-      args: ['-e', "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1000);console.log(JSON.stringify({title:'Planned run',tasks:[{key:'docs',title:'Create delivery note',agent:'codex',files:['delivery-note.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'none'}]}))"]
+      args: ['-e', "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1000);const plan={title:'Planned run',tasks:[{key:'docs',title:'Create delivery note',agent:'codex',files:['delivery-note.md'],dependsOn:[],acceptance:'node --check server.mjs',risk:'none'}]};console.log(JSON.stringify({type:'item.completed',item:{id:'planner-message',type:'agent_message',text:JSON.stringify(plan)}}));console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:123,output_tokens:45}}))"],
+      streamProtocol: 'codex-jsonl'
     },
     agents: {
-      codex: { command: process.execPath, args: ['-e', fakeCodex], discussionArgs: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'], health: { versionArgs: ['--version'], authArgs: ['-e', "console.log('authenticated')"] } },
+      codex: { command: process.execPath, args: ['-e', fakeCodex], discussionArgs: ['-e', fakeCodex], reviewArgs: ['-e', fakeConflictReviewer, '{{worktree}}'], health: { versionArgs: ['--version'], capabilityArgs: ['-e', "console.log('--json --ephemeral')"], requiredOptions: ['--json', '--ephemeral'], authArgs: ['-e', "console.log('authenticated')"] } },
       'claude-code': { command: process.execPath, args: ['-e', fakeClaude, '{{worktree}}'], discussionArgs: ['-e', fakeClaude, '{{worktree}}'], reviewArgs: ['-e', fakeClaude, '{{worktree}}'], timeoutMs: 75 },
       antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], reviewArgs: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
     }
@@ -197,6 +198,13 @@ try {
 
   const fixtureConfigPath = join(fixture, '.aod.config.json');
   const originalFixtureConfig = JSON.parse(await readFile(fixtureConfigPath, 'utf8'));
+  const incompatibleFixtureConfig = structuredClone(originalFixtureConfig);
+  incompatibleFixtureConfig.agents['claude-code'].health = { capabilityArgs: ['-e', "console.log('--output-format')"], requiredOptions: ['--effort'] };
+  await writeFile(fixtureConfigPath, JSON.stringify(incompatibleFixtureConfig));
+  const incompatibleHealth = await api('/api/agents/claude-code/check', { method: 'POST', body: '{}' });
+  assert.equal(incompatibleHealth.status, 'error');
+  assert.equal(incompatibleHealth.message.includes('--effort'), true);
+  await writeFile(fixtureConfigPath, JSON.stringify(originalFixtureConfig));
   const changedFixtureConfig = structuredClone(originalFixtureConfig);
   changedFixtureConfig.agents.codex.command = `${process.execPath}.changed`;
   await writeFile(fixtureConfigPath, JSON.stringify(changedFixtureConfig));
@@ -742,6 +750,7 @@ try {
   assert.equal(processHistory.some(item => item.task_id === timeout.id && item.status === 'timed_out'), true);
   assert.equal(processHistory.some(item => item.task_id === failed.id && item.status === 'failed' && item.exit_code === 7), true);
   assert.equal(processHistory.some(item => item.run_id === groupRun.id && item.session_id === groupSession.id), true);
+  assert.equal(processHistory.some(item => item.kind === 'planner' && item.input_tokens === 123 && item.output_tokens === 45), true, 'Planner usage was not persisted to the process ledger.');
   assert.equal(processHistory.every(item => item.status !== 'running'), true, 'Settled integration fixtures left a running process ledger row.');
   const metrics = await api('/api/metrics');
   assert.equal(metrics.summary.invocations, processHistory.length);
