@@ -25,9 +25,10 @@ const port = Number(process.env.PORT || 4821);
 const appVersion = (() => {
   try { return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version || 'unknown'; } catch { return 'unknown'; }
 })();
-const bindHost = String(process.env.AOD_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
-const mobileEnabled = /^(1|true|yes|on)$/i.test(String(process.env.AOD_MOBILE_ENABLED || ''));
-const mobilePublicUrlOverride = String(process.env.AOD_PUBLIC_URL || '').trim().replace(/\/$/, '');
+const defaultBindHost = String(process.env.AOD_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
+const defaultMobileEnabled = /^(1|true|yes|on)$/i.test(String(process.env.AOD_MOBILE_ENABLED || ''));
+const defaultMobilePublicUrl = String(process.env.AOD_PUBLIC_URL || '').trim().replace(/\/$/, '');
+let bindHost = defaultBindHost;
 const agents = ['codex', 'claude-code', 'antigravity'];
 const statuses = ['draft', 'preparing', 'ready', 'running', 'verifying', 'reviewing', 'repairing', 'merge_ready', 'merging', 'conflict_review', 'recovery_required', 'failed', 'cancelled', 'merged'];
 const transitions = {
@@ -378,6 +379,9 @@ setDefault('integration_branch', 'main');
 setDefault('worktree_retention_hours', '72');
 setDefault('last_backup_at', '');
 setDefault('active_workspace_id', '');
+setDefault('mobile_access_enabled', defaultMobileEnabled ? '1' : '0');
+setDefault('mobile_bind_host', defaultBindHost);
+setDefault('mobile_public_url', defaultMobilePublicUrl);
 
 function setDefault(key, value) {
   db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)').run(key, value);
@@ -394,9 +398,59 @@ function httpError(code, status, message) {
   return Object.assign(new Error(message), { code, status });
 }
 
+function mobileAccessEnabled() {
+  return /^(1|true|yes|on)$/i.test(String(getSetting('mobile_access_enabled') || ''));
+}
+
+function mobileBindHost() {
+  const value = String(getSetting('mobile_bind_host') || defaultBindHost).trim();
+  return ['127.0.0.1', '0.0.0.0'].includes(value) ? value : '127.0.0.1';
+}
+
+function mobileConfiguredPublicUrl() {
+  return String(getSetting('mobile_public_url') || '').trim().replace(/\/$/, '') || null;
+}
+
+function mobileConfiguration() {
+  return { enabled: mobileAccessEnabled(), bindHost: mobileBindHost(), publicUrl: mobileConfiguredPublicUrl() };
+}
+
+function normalizeMobilePublicUrl(value) {
+  const raw = String(value || '').trim().replace(/\/$/, '');
+  if (!raw) return null;
+  let parsed;
+  try { parsed = new URL(raw); } catch { throw httpError('MOBILE_PUBLIC_URL_INVALID', 400, 'Public mobile URL must be a valid HTTP(S) address.'); }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    throw httpError('MOBILE_PUBLIC_URL_INVALID', 400, 'Public mobile URL must be an HTTP(S) origin without credentials or a path.');
+  }
+  return parsed.origin;
+}
+
+function saveMobileConfiguration(payload) {
+  const enabled = payload?.enabled === true;
+  const requestedBindHost = String(payload?.bindHost || (enabled ? '0.0.0.0' : '127.0.0.1')).trim();
+  if (!['127.0.0.1', '0.0.0.0'].includes(requestedBindHost)) {
+    throw httpError('MOBILE_BIND_HOST_INVALID', 400, 'Mobile bind host must be 127.0.0.1 or 0.0.0.0.');
+  }
+  const nextBindHost = enabled ? requestedBindHost : '127.0.0.1';
+  const publicUrl = normalizeMobilePublicUrl(payload?.publicUrl);
+  setSetting('mobile_access_enabled', enabled ? '1' : '0');
+  setSetting('mobile_bind_host', nextBindHost);
+  setSetting('mobile_public_url', publicUrl || '');
+  if (nextBindHost !== bindHost) {
+    setTimeout(() => {
+      rebindHttpServer(nextBindHost).then(() => appendEvent('mobile_access', `Mobile access rebound to ${nextBindHost}.`)).catch(error => {
+        console.error(`Unable to rebind mobile access to ${nextBindHost}:`, error);
+      });
+    }, 0).unref();
+  }
+  return { enabled, bindHost: nextBindHost, publicUrl };
+}
+
 function mobilePublicUrl() {
-  if (mobilePublicUrlOverride) return mobilePublicUrlOverride;
-  if (!mobileEnabled) return null;
+  const configured = mobileConfiguredPublicUrl();
+  if (configured) return configured;
+  if (!mobileAccessEnabled()) return null;
   const addresses = Object.values(networkInterfaces()).flat().filter(Boolean);
   const tailscale = addresses.find(item => (item.family === 'IPv4' || item.family === 4) && !item.internal && /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(item.address));
   return tailscale ? `http://${tailscale.address}:${port}` : null;
@@ -406,12 +460,12 @@ function mobileStatus() {
   const publicUrl = mobilePublicUrl();
   const localOnly = /^127\.|^localhost$|^::1$/.test(bindHost);
   return {
-    enabled: mobileEnabled,
+    enabled: mobileAccessEnabled(),
     authMode: 'password',
     accountConfigured: Boolean(db.prepare('SELECT 1 FROM mobile_accounts LIMIT 1').get()),
     bindHost,
     publicUrl,
-    reachable: mobileEnabled && !localOnly && Boolean(publicUrl),
+    reachable: mobileAccessEnabled() && !localOnly && Boolean(publicUrl),
   };
 }
 
@@ -432,7 +486,7 @@ function mobileRequestIsPublic(request, url) {
 function authorizeRequest(request, url) {
   const local = isLocalRequest(request);
   if (local) return { local: true, device: null };
-  if (!mobileEnabled) throw httpError('MOBILE_REMOTE_DISABLED', 403, 'Remote mobile access is disabled.');
+  if (!mobileAccessEnabled()) throw httpError('MOBILE_REMOTE_DISABLED', 403, 'Remote mobile access is disabled.');
   if (mobileRequestIsPublic(request, url)) return { local: false, device: null };
   const token = parseBearerToken(request.headers.authorization);
   const device = mobileDeviceForToken(token);
@@ -442,7 +496,7 @@ function authorizeRequest(request, url) {
 }
 
 function requireMobileEnabled() {
-  if (!mobileEnabled) throw httpError('MOBILE_DISABLED', 409, 'Mobile access is disabled. Set AOD_MOBILE_ENABLED=1 and restart AOD.');
+  if (!mobileAccessEnabled()) throw httpError('MOBILE_DISABLED', 409, 'Mobile access is disabled. Enable it from the local desktop console.');
 }
 
 function mobileAccountSummary() {
@@ -2595,7 +2649,16 @@ async function confirmGroupConsensus(session, payload) {
   const planId = `PLAN-GROUP-${session.id}`;
   const createdAt = now();
   const planDag = { title: String(consensus.title || 'Group run').trim(), tasks: normalizedTasks };
-  db.prepare('INSERT INTO plans(id, requirement, planner, dag_json, status, workspace_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  db.prepare(`INSERT INTO plans(id, requirement, planner, dag_json, status, workspace_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      requirement = excluded.requirement,
+      planner = excluded.planner,
+      dag_json = excluded.dag_json,
+      status = 'ready',
+      error = NULL,
+      workspace_id = excluded.workspace_id,
+      updated_at = excluded.updated_at`)
     .run(planId, session.requirement, `group:${session.group_id}`, JSON.stringify(planDag), 'ready', session.workspace_id, createdAt, createdAt);
   const run = await createRunFromPlan(db.prepare('SELECT * FROM plans WHERE id = ?').get(planId), { title: planDag.title, tasks: normalizedTasks });
   const createdTasks = runTasks(run.id);
@@ -2820,6 +2883,14 @@ async function body(request) { let data = ''; for await (const chunk of request)
 async function api(request, response, url) {
   request.mobileContext = authorizeRequest(request, url);
   if (request.method === 'GET' && url.pathname === '/api/mobile/status') return send(response, 200, mobileStatus());
+  if (request.method === 'GET' && url.pathname === '/api/mobile/config') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Mobile service settings are available from the local desktop console.');
+    return send(response, 200, mobileConfiguration());
+  }
+  if (request.method === 'POST' && url.pathname === '/api/mobile/config') {
+    if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Mobile service settings are available from the local desktop console.');
+    return send(response, 200, saveMobileConfiguration(await body(request)));
+  }
   if (request.method === 'GET' && url.pathname === '/api/mobile/account') {
     if (!request.mobileContext.local) throw httpError('MOBILE_LOCAL_ONLY', 403, 'Mobile account management is available from the local desktop console.');
     return send(response, 200, mobileAccountSummary());
@@ -3081,6 +3152,30 @@ const httpServer = createServer(async (request, response) => {
     });
   }
 });
+
+function rebindHttpServer(nextBindHost) {
+  if (nextBindHost === bindHost) return Promise.resolve();
+  for (const response of eventStreams) response.end();
+  eventStreams.clear();
+  return new Promise((resolve, reject) => {
+    httpServer.close(closeError => {
+      if (closeError) return reject(closeError);
+      const onError = error => {
+        httpServer.off('error', onError);
+        reject(error);
+      };
+      httpServer.once('error', onError);
+      httpServer.listen(port, nextBindHost, () => {
+        httpServer.off('error', onError);
+        bindHost = nextBindHost;
+        console.log(`AOD console is available at http://${bindHost}:${port}`);
+        resolve();
+      });
+    });
+  });
+}
+
+bindHost = mobileBindHost();
 httpServer.listen(port, bindHost, () => console.log(`AOD console is available at http://${bindHost}:${port}`));
 
 function flushRuntimeBuffers() {

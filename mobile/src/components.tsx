@@ -18,6 +18,10 @@ export function StatusPill({ value, tone = 'accent' }: { value: string; tone?: '
   return <Text style={[styles.pill, tone === 'warning' && styles.pillWarning, tone === 'danger' && styles.pillDanger, tone === 'muted' && styles.pillMuted]}>{value}</Text>;
 }
 
+export function SegmentedControl({ value, options, onChange }: { value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
+  return <View style={styles.segmented}>{options.map(option => <Pressable key={option.value} accessibilityRole="tab" accessibilityState={{ selected: option.value === value }} onPress={() => onChange(option.value)} style={[styles.segment, option.value === value && styles.segmentActive]}><Text style={[styles.segmentText, option.value === value && styles.segmentTextActive]}>{option.label}</Text></Pressable>)}</View>;
+}
+
 export function Card({ children, onPress, style }: { children: React.ReactNode; onPress?: () => void; style?: any }) {
   const content = <View style={[styles.card, style]}>{children}</View>;
   return onPress ? <Pressable onPress={onPress} style={({ pressed }) => [pressed && styles.pressed]}>{content}</Pressable> : content;
@@ -80,6 +84,11 @@ export const styles = StyleSheet.create({
   pillWarning: { backgroundColor: '#fff3dc', color: colors.warning },
   pillDanger: { backgroundColor: '#fff0ee', color: colors.danger },
   pillMuted: { backgroundColor: colors.surfaceSubtle, color: colors.muted },
+  segmented: { flexDirection: 'row', gap: 4, padding: 4, marginBottom: spacing.sm, borderRadius: radius.control, backgroundColor: colors.surfaceSubtle },
+  segment: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.sm, borderRadius: 8 },
+  segmentActive: { backgroundColor: colors.surface },
+  segmentText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  segmentTextActive: { color: colors.accent },
   button: { minHeight: 48, paddingHorizontal: spacing.md, borderRadius: radius.control, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm },
   primary: { backgroundColor: colors.command },
   secondary: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },

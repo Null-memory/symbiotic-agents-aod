@@ -199,6 +199,8 @@ try {
   assert.equal(mobileStatus.publicUrl, `http://100.64.0.4:${port}`);
   assert.equal(mobileStatus.authMode, 'password');
   assert.equal(mobileStatus.accountConfigured, false);
+  const initialMobileConfig = await api('/api/mobile/config');
+  assert.deepEqual(initialMobileConfig, { enabled: true, bindHost: '0.0.0.0', publicUrl: `http://100.64.0.4:${port}` });
   const account = await api('/api/mobile/account', { method: 'POST', body: JSON.stringify({ username: ' AOD.Admin ', password: 'a-secure-pass' }) });
   assert.deepEqual(account, { configured: true, username: 'aod.admin', created_at: account.created_at, updated_at: account.updated_at });
   assert.equal((await api('/api/mobile/account')).username, 'aod.admin');
@@ -225,6 +227,15 @@ try {
     const revoked = await remoteApiFailure('/api/state', { headers: { authorization: `Bearer ${paired.token}` } });
     assert.equal(revoked.code, 'MOBILE_AUTH_INVALID');
   }
+  const disabledMobileConfig = await api('/api/mobile/config', { method: 'POST', body: JSON.stringify({ enabled: false, bindHost: '127.0.0.1', publicUrl: '' }) });
+  assert.deepEqual(disabledMobileConfig, { enabled: false, bindHost: '127.0.0.1', publicUrl: null });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await api('/api/mobile/status')).enabled, false);
+  assert.equal((await apiFailure('/api/mobile/login', { method: 'POST', body: JSON.stringify({ username: 'aod.admin', password: 'a-secure-pass', deviceName: 'Test Android' }) })).code, 'MOBILE_DISABLED');
+  const restoredMobileConfig = await api('/api/mobile/config', { method: 'POST', body: JSON.stringify({ enabled: true, bindHost: '0.0.0.0', publicUrl: `http://100.64.0.4:${port}` }) });
+  assert.deepEqual(restoredMobileConfig, { enabled: true, bindHost: '0.0.0.0', publicUrl: `http://100.64.0.4:${port}` });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await api('/api/mobile/status')).reachable, true);
   assert.equal((await apiFailure('/api/workspaces/validate', { method: 'POST', body: JSON.stringify({ path: 'relative-project' }) })).code, 'WORKSPACE_PATH_NOT_ABSOLUTE');
   const browsedDirectories = await api(`/api/filesystem/directories?path=${encodeURIComponent(fixture)}`);
   assert.equal(browsedDirectories.path, fixture);
@@ -532,6 +543,14 @@ try {
   assert.equal(groupProcess.first_event_at, processStream.find(event => event.sequence > 1)?.at, 'Synthetic process-start status must not count as the Agent first response.');
   const invalidRecovery = await apiFailure(`/api/group-turns/${discussed.turns[0].id}/recover`, { method: 'POST', body: JSON.stringify({ action: 'unknown' }) });
   assert.equal(invalidRecovery.error.includes('retry, skip, or replace'), true);
+
+  const dirtyConfirmationProbe = join(fixture, 'dirty-confirmation-probe.txt');
+  await writeFile(dirtyConfirmationProbe, 'dirty worktree\n');
+  const firstDirtyConfirmation = await apiFailure(`/api/group-sessions/${groupSession.id}/confirm`, { method: 'POST', body: JSON.stringify({ consensus: discussed.consensus }) });
+  assert.match(firstDirtyConfirmation.error, /uncommitted changes/i);
+  const retriedDirtyConfirmation = await apiFailure(`/api/group-sessions/${groupSession.id}/confirm`, { method: 'POST', body: JSON.stringify({ consensus: discussed.consensus }) });
+  assert.match(retriedDirtyConfirmation.error, /uncommitted changes/i);
+  await rm(dirtyConfirmationProbe);
 
   const concurrentTasks = [];
   for (let index = 1; index <= 3; index += 1) {

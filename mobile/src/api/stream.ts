@@ -3,6 +3,10 @@ import type { MobileConnection, StreamEvent } from './types';
 
 export type StreamHandle = { close: () => void };
 
+export function retryDelayMs(attempt: number) {
+  return Math.min(15000, 800 * (2 ** Math.max(0, attempt)));
+}
+
 export function connectMobileStream(connection: MobileConnection, after: number, onEvent: (event: StreamEvent) => void, onError: (error: Error) => void): StreamHandle {
   const url = `${connection.baseUrl.replace(/\/$/, '')}/api/stream?after=${Math.max(0, after)}`;
   const source = new SSE<'state' | 'event' | 'workspace' | 'process' | 'group_session' | 'group_turn' | 'group_message' | 'task_role' | 'agent_stream'>(url, { headers: { authorization: `Bearer ${connection.token}`, 'last-event-id': String(Math.max(0, after)) }, timeout: 0 });

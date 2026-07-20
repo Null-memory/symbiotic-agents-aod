@@ -180,6 +180,15 @@
     <dialog class="mobile-dialog" id="mobileConnectionDialog" aria-labelledby="mobileConnectionDialogTitle">
       <div class="dialog-head"><div><p class="kicker">ANDROID COMPANION</p><h2 id="mobileConnectionDialogTitle">手机连接</h2></div><button class="icon-button" id="closeMobileConnection" type="button" aria-label="关闭">×</button></div>
       <div class="mobile-connection-status" id="mobileConnectionStatus"><span class="status-pill">检查中</span><p>正在读取移动连接配置。</p></div>
+      <section class="mobile-service-panel">
+        <div class="section-head"><div><p class="kicker">MOBILE ACCESS</p><h3>移动服务</h3></div><span class="status-pill">本机控制</span></div>
+        <p class="mobile-account-hint">开启后，AOD 会监听 Tailscale 可访问的地址；关闭时立即回收为本机监听。公开地址留空时会自动检测 Tailscale 地址。</p>
+        <form id="mobileServiceForm" class="mobile-service-form">
+          <label class="mobile-access-toggle"><span><strong>允许 Android 连接</strong><small>账号密码与设备会话仍由本机管理</small></span><input id="mobileAccessEnabled" type="checkbox" role="switch" /></label>
+          <div class="form-row"><label>监听地址<select id="mobileBindHost"><option value="0.0.0.0">Tailscale / 局域网</option><option value="127.0.0.1">仅本机</option></select></label><label>公开地址<input id="mobilePublicUrl" type="url" inputmode="url" placeholder="自动检测 Tailscale 地址" /></label></div>
+          <div class="dialog-actions"><span id="mobileServiceMessage" class="mobile-account-message">正在读取服务设置。</span><button class="primary compact" id="saveMobileService" type="submit">应用服务设置</button></div>
+        </form>
+      </section>
       <section class="mobile-account-panel">
         <div class="section-head"><div><p class="kicker">PASSWORD LOGIN</p><h3>设置移动账号</h3></div><span class="status-pill">本机设置</span></div>
         <p class="mobile-account-hint">Android 端使用这里的账号密码登录。服务端只保存密码哈希，登录后手机会获得可撤销的设备会话。</p>

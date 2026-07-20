@@ -6,6 +6,9 @@
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
+    "android:run": "expo run:android",
+    "android:apk": "npx eas-cli@latest build --platform android --profile preview",
+    "android:aab": "npx eas-cli@latest build --platform android --profile production",
     "typecheck": "tsc --noEmit",
     "test": "node contract.test.mjs"
   },

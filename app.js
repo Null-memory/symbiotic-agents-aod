@@ -751,10 +751,21 @@ function renderMobileConnectionStatus(status) {
   const message = status.reachable
     ? `手机可通过 Tailscale 连接 ${status.publicUrl}，使用下方账号密码登录。请确保 Windows 防火墙允许 AOD 端口。`
     : status.enabled
-      ? '移动模式已开启，但没有可访问的 Tailscale 地址；请配置 AOD_PUBLIC_URL，并使用非 loopback 监听地址。'
-      : '移动连接默认关闭。设置 AOD_MOBILE_ENABLED=1、AOD_BIND_HOST 和 AOD_PUBLIC_URL 后重启服务；账号可以先在这里设置。';
+      ? '移动服务已开启，但没有可访问的 Tailscale 地址。可在下方填写公开地址，或检查 Tailscale 与 Windows 防火墙。'
+      : '移动连接当前关闭。可直接在下方开启，AOD 会自动切换为对应监听地址。';
   panel.innerHTML = `<span class="status-pill ${status.reachable ? '' : 'warning'}">${state}</span><p>${escapeHtml(message)}</p>`;
   button.disabled = false;
+}
+
+function renderMobileServiceConfig(config) {
+  $('#mobileAccessEnabled').checked = Boolean(config.enabled);
+  $('#mobileBindHost').value = config.bindHost || (config.enabled ? '0.0.0.0' : '127.0.0.1');
+  $('#mobilePublicUrl').value = config.publicUrl || '';
+  $('#mobileBindHost').disabled = !config.enabled;
+  $('#mobilePublicUrl').disabled = !config.enabled;
+  $('#mobileServiceMessage').textContent = config.enabled
+    ? `服务已开启：${config.bindHost}${config.publicUrl ? ` · ${config.publicUrl}` : ' · 自动检测公开地址'}`
+    : '服务已关闭，仅本机桌面控制台可访问。';
 }
 
 function renderMobileDevices(devices) {
@@ -766,8 +777,9 @@ function renderMobileDevices(devices) {
 
 async function refreshMobileConnection() {
   try {
-    const [status, account, deviceResult] = await Promise.all([request('/api/mobile/status'), request('/api/mobile/account'), request('/api/mobile/devices')]);
+    const [status, config, account, deviceResult] = await Promise.all([request('/api/mobile/status'), request('/api/mobile/config'), request('/api/mobile/account'), request('/api/mobile/devices')]);
     renderMobileConnectionStatus(status);
+    renderMobileServiceConfig(config);
     $('#mobileAccountUsername').value = account.username || '';
     $('#mobileAccountPassword').value = '';
     $('#mobileAccountMessage').textContent = account.configured ? `已设置账号：${account.username}` : '尚未设置账号。';
@@ -775,6 +787,32 @@ async function refreshMobileConnection() {
   } catch (error) {
     $('#mobileConnectionStatus').innerHTML = `<span class="status-pill warning">ERROR</span><p>${escapeHtml(error.message)}</p>`;
     $('#saveMobileAccount').disabled = false;
+  }
+}
+
+async function saveMobileService(event) {
+  event.preventDefault();
+  const button = $('#saveMobileService');
+  const enabled = $('#mobileAccessEnabled').checked;
+  button.disabled = true;
+  button.textContent = '应用中…';
+  try {
+    await request('/api/mobile/config', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled,
+        bindHost: enabled ? $('#mobileBindHost').value : '127.0.0.1',
+        publicUrl: $('#mobilePublicUrl').value.trim()
+      })
+    });
+    await new Promise(resolve => setTimeout(resolve, 220));
+    await refreshMobileConnection();
+    tell(enabled ? '移动服务已开启。' : '移动服务已关闭。');
+  } catch (error) {
+    tell(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '应用服务设置';
   }
 }
 
@@ -804,6 +842,13 @@ $('#openMobileConnection').addEventListener('click', async () => {
 });
 $('#closeMobileConnection').addEventListener('click', () => $('#mobileConnectionDialog').close());
 $('#cancelMobileConnection').addEventListener('click', () => $('#mobileConnectionDialog').close());
+$('#mobileServiceForm').addEventListener('submit', saveMobileService);
+$('#mobileAccessEnabled').addEventListener('change', event => {
+  const enabled = event.target.checked;
+  $('#mobileBindHost').disabled = !enabled;
+  $('#mobilePublicUrl').disabled = !enabled;
+  if (enabled && $('#mobileBindHost').value === '127.0.0.1') $('#mobileBindHost').value = '0.0.0.0';
+});
 $('#mobileAccountForm').addEventListener('submit', saveMobileAccount);
 $('#refreshMobileDevices').addEventListener('click', refreshMobileConnection);
 $('#mobileDeviceList').addEventListener('click', async event => {
