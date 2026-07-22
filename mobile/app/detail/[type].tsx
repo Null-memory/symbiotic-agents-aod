@@ -1,4 +1,5 @@
-import { useLocalSearchParams } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { BackHeader, Card, ConfirmButton, ErrorState, Screen, SegmentedControl, StatusPill, styles } from '@/components';
@@ -16,6 +17,7 @@ export default function DetailScreen() {
   const [detail, setDetail] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
+  const [artifacts, setArtifacts] = useState<any>(null);
   const [message, setMessage] = useState('');
   const [consensusDraft, setConsensusDraft] = useState<any>(null);
   const [groupTab, setGroupTab] = useState('overview');
@@ -27,15 +29,21 @@ export default function DetailScreen() {
     const path = params.type === 'group' ? `/api/group-sessions/${params.id}` : params.type === 'run' ? `/api/runs/${params.id}` : `/api/tasks/${params.id}`;
     const requests = [mobileRequest<any>(connection, path)];
     if (params.type === 'group') requests.push(mobileRequest<any[]>(connection, `/api/group-sessions/${params.id}/messages`));
-    if (params.type === 'task') requests.push(mobileRequest<any[]>(connection, `/api/tasks/${params.id}/logs`));
-    Promise.all(requests).then(([main, secondary]) => {
+    if (params.type === 'task') {
+      requests.push(mobileRequest<any[]>(connection, `/api/tasks/${params.id}/logs`));
+      requests.push(mobileRequest<any>(connection, `/api/tasks/${params.id}/artifacts`));
+    }
+    Promise.all(requests).then(([main, secondary, taskArtifacts]) => {
       if (!active) return;
       setDetail(main);
       if (params.type === 'group') {
         setMessages(secondary || []);
         setConsensusDraft(main.consensus ? JSON.parse(JSON.stringify(main.consensus)) : null);
       }
-      if (params.type === 'task') setLogs(secondary || []);
+      if (params.type === 'task') {
+        setLogs(secondary || []);
+        setArtifacts(taskArtifacts || null);
+      }
     }).catch(reason => active && setError(reason instanceof Error ? reason.message : '无法读取详情。'));
     return () => { active = false; };
   }, [connection, params.id, params.type]);
@@ -44,7 +52,7 @@ export default function DetailScreen() {
   if (error) return <Screen scroll={false}><BackHeader title={labels[params.type] || '详情'} /><ErrorState message={error} /></Screen>;
   if (!detail) return <Screen scroll={false}><BackHeader title={labels[params.type] || '详情'} /><View style={styles.center}><ActivityIndicator color={colors.accent} /></View></Screen>;
 
-  const status = detail.status || detail.ci_status || 'unknown';
+  const status = params.type === 'run' ? effectiveRunStatus(detail) : detail.status || detail.ci_status || 'unknown';
   const review = params.type === 'task' ? (data?.reviews || []).find(item => item.task_id === detail.id) : null;
   const action = params.type === 'group' ? groupAction(detail, runAction, refresh, consensusDraft) : params.type === 'run' ? runActionForRun(detail, runAction, refresh) : taskAction(detail, runAction, refresh);
 
@@ -69,6 +77,8 @@ export default function DetailScreen() {
       }} /> : null}
       {groupTab === 'consensus' ? <GroupConsensusEditor consensus={consensusDraft} members={detail.members || []} onChange={setConsensusDraft} /> : null}
     </> : <>
+      {params.type === 'run' ? <RunTasks run={detail} /> : null}
+      {params.type === 'task' ? <TaskArtifacts task={detail} result={artifacts} connection={connection} /> : null}
       {action ? <View style={detailStyles.actionArea}>{action}</View> : null}
       {review ? <ConflictReview review={review} runAction={runAction} refresh={refresh} /> : null}
       {params.type === 'task' ? <TaskLogs logs={logs} /> : null}
@@ -118,6 +128,82 @@ function MemberSelector({ members, value, onChange }: { members: any[]; value?: 
 }
 
 function csv(value: string) { return value.split(',').map(item => item.trim()).filter(Boolean); }
+
+function effectiveRunStatus(run: any) {
+  const tasks = run?.tasks || [];
+  if (tasks.some((task: any) => task.status === 'recovery_required')) return 'recovery_required';
+  if (tasks.length && tasks.some((task: any) => task.status === 'merge_ready')
+    && tasks.every((task: any) => ['merge_ready', 'merged'].includes(task.status))) return 'awaiting_merge';
+  return run?.ci_status || run?.status || 'unknown';
+}
+
+function RunTasks({ run }: { run: any }) {
+  const tasks = run.tasks || [];
+  const waitingForMerge = effectiveRunStatus(run) === 'awaiting_merge';
+  return <>
+    {waitingForMerge ? <Card style={detailStyles.gateCard}>
+      <View style={detailStyles.noticeTitle}><Ionicons name="hand-left-outline" size={20} color={colors.warning} /><Text style={detailStyles.sectionTitle}>正在等待人工合并</Text></View>
+      <Text style={detailStyles.helper}>流程没有卡住。任务已完成验收和检查，按安全策略需要你确认后才会合入运行分支。</Text>
+    </Card> : null}
+    <Card>
+      <Text style={detailStyles.sectionTitle}>运行任务</Text>
+      {tasks.length ? tasks.map((task: any) => <Pressable key={task.id} onPress={() => router.push({ pathname: '/detail/[type]', params: { type: 'task', id: task.id } })} style={({ pressed }) => [detailStyles.artifactRow, pressed && detailStyles.rowPressed]}>
+        <View style={detailStyles.rowCopy}><Text style={detailStyles.rowTitle}>{task.title || task.id}</Text><Text style={detailStyles.helper}>{task.id} · 点击查看成品与验收结果</Text></View>
+        <StatusPill value={statusLabel(task.status)} tone={statusTone(task.status)} />
+      </Pressable>) : <Text style={detailStyles.helper}>这个运行还没有任务。</Text>}
+    </Card>
+  </>;
+}
+
+function TaskArtifacts({ task, result, connection }: { task: any; result: any; connection: any }) {
+  const items = result?.artifacts || [];
+  const primary = items.find((item: any) => item.primary && item.text) || items.find((item: any) => item.text);
+  const [selectedPath, setSelectedPath] = useState('');
+  const [preview, setPreview] = useState<any>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!selectedPath && primary?.path) setSelectedPath(primary.path);
+  }, [primary?.path, selectedPath]);
+
+  useEffect(() => {
+    if (!connection || !selectedPath) return;
+    let active = true;
+    setLoading(true);
+    setPreviewError(null);
+    mobileRequest<any>(connection, `/api/tasks/${task.id}/artifacts?path=${encodeURIComponent(selectedPath)}`)
+      .then(value => { if (active) setPreview(value); })
+      .catch(reason => { if (active) setPreviewError(reason instanceof Error ? reason.message : '无法读取交付物。'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [connection, selectedPath, task.id]);
+
+  return <>
+    {task.status === 'merge_ready' ? <Card style={detailStyles.gateCard}>
+      <View style={detailStyles.noticeTitle}><Ionicons name="checkmark-circle-outline" size={21} color={colors.accent} /><Text style={detailStyles.sectionTitle}>任务已完成，等待合并</Text></View>
+      <Text style={detailStyles.helper}>已验收 commit：{String(task.verified_commit || '').slice(0, 12) || '未记录'}。点击下方文档即可查看实际成品。</Text>
+    </Card> : null}
+    <Card>
+      <Text style={detailStyles.sectionTitle}>成品输出</Text>
+      <Text selectable style={detailStyles.projectPath}>工程位置：{result?.projectLocation || task.worktree || '未创建 worktree'}</Text>
+      {!result ? <ActivityIndicator color={colors.accent} /> : items.length ? items.map((item: any) => <Pressable key={item.path} disabled={!item.text} onPress={() => setSelectedPath(item.path)} style={({ pressed }) => [detailStyles.artifactRow, selectedPath === item.path && detailStyles.artifactRowActive, pressed && detailStyles.rowPressed]}>
+        <View style={detailStyles.artifactIcon}><Ionicons name={item.kind === 'document' ? 'document-text-outline' : item.kind === 'launcher' ? 'play-circle-outline' : item.kind === 'guide' ? 'book-outline' : 'code-slash-outline'} size={20} color={item.primary ? colors.accent : colors.muted} /></View>
+        <View style={detailStyles.rowCopy}><Text style={detailStyles.rowTitle}>{item.name}</Text><Text style={detailStyles.helper}>{item.path} · {formatBytes(item.size)}{item.text ? ' · 可预览' : ''}</Text></View>
+        {item.primary ? <StatusPill value="成品" tone="accent" /> : null}
+      </Pressable>) : <Text style={detailStyles.helper}>当前验收 commit 中没有可用的交付物。</Text>}
+    </Card>
+    {selectedPath ? <Card>
+      <Text style={detailStyles.sectionTitle}>{selectedPath}</Text>
+      {loading ? <ActivityIndicator color={colors.accent} /> : previewError ? <Text style={detailStyles.inlineError}>{previewError}</Text> : <Text selectable style={detailStyles.artifactContent}>{preview?.content || '文件内容为空。'}</Text>}
+    </Card> : null}
+  </>;
+}
+
+function formatBytes(value: number) {
+  const size = Number(value || 0);
+  return size >= 1024 ? `${(size / 1024).toFixed(1)} KB` : `${size} B`;
+}
 
 function GroupMessages({ messages, message, setMessage, send }: { messages: any[]; message: string; setMessage: (value: string) => void; send: () => Promise<void> }) {
   return <Card><Text style={detailStyles.sectionTitle}>消息时间线</Text>{messages.length ? <FlatList data={messages.slice(-80)} keyExtractor={item => String(item.id)} scrollEnabled={false} renderItem={({ item }) => <View style={detailStyles.messageRow}><Text style={detailStyles.messageMeta}>{item.sender_kind === 'operator' ? '操作者' : item.sender_member_id || 'Agent'} · {item.phase}</Text><Text style={detailStyles.messageBody}>{item.content}</Text></View>} /> : <Text style={detailStyles.helper}>会话尚未产生消息。</Text>}<View style={detailStyles.messageComposer}><TextInput value={message} onChangeText={setMessage} placeholder="给下一轮留一句话" multiline style={detailStyles.messageInput} /><ConfirmButton label="发送" message="发送这条操作者消息？" onConfirm={send} /></View></Card>;
@@ -174,7 +260,18 @@ const detailStyles = {
   heroTitle: { flex: 1, color: colors.text, fontSize: 19, fontWeight: '800' as const, lineHeight: 26 },
   actionArea: { gap: spacing.sm, marginBottom: spacing.sm },
   sectionTitle: { color: colors.text, fontSize: 15, fontWeight: '800' as const },
+  gateCard: { borderColor: '#eed9aa', backgroundColor: '#fffbf1' },
+  noticeTitle: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: spacing.sm },
   helper: { color: colors.muted, fontSize: 12, lineHeight: 18 },
+  projectPath: { color: colors.muted, fontFamily: 'Courier New', fontSize: 10, lineHeight: 16 },
+  artifactRow: { minHeight: 58, flexDirection: 'row' as const, alignItems: 'center' as const, gap: spacing.sm, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
+  artifactRowActive: { paddingHorizontal: spacing.sm, borderRadius: radius.control, borderBottomColor: colors.accent, backgroundColor: '#edf7f5' },
+  artifactIcon: { width: 36, height: 36, alignItems: 'center' as const, justifyContent: 'center' as const, borderRadius: radius.control, backgroundColor: colors.surfaceSubtle },
+  rowCopy: { flex: 1, gap: 3 },
+  rowTitle: { color: colors.text, fontSize: 13, fontWeight: '800' as const },
+  rowPressed: { opacity: 0.68 },
+  artifactContent: { color: colors.text, fontFamily: 'Courier New', fontSize: 11, lineHeight: 19 },
+  inlineError: { color: colors.danger, fontSize: 12, lineHeight: 18 },
   requirement: { color: colors.text, fontSize: 14, lineHeight: 22 },
   expand: { color: colors.accent, fontSize: 12, fontWeight: '700' as const },
   summaryRow: { flexDirection: 'row' as const, flexWrap: 'wrap' as const, gap: spacing.sm },

@@ -1,5 +1,6 @@
 export const statusLabel = (value: string) => ({
   awaiting_confirmation: '待确认',
+  awaiting_merge: '等待人工合并',
   recovery_required: '等待恢复',
   merge_ready: '待合并',
   ready_to_publish: '可发布',
@@ -24,7 +25,7 @@ export const statusLabel = (value: string) => ({
 
 export const statusTone = (status: string) => ['failed', 'cancelled', 'recovery_required', 'conflict_review'].includes(status)
   ? 'danger' as const
-  : ['awaiting_confirmation', 'merge_ready', 'ready_to_publish', 'reviewing', 'repairing', 'paused'].includes(status)
+  : ['awaiting_confirmation', 'awaiting_merge', 'merge_ready', 'ready_to_publish', 'reviewing', 'repairing', 'paused'].includes(status)
     ? 'warning' as const
     : ['draft', 'pending'].includes(status)
       ? 'muted' as const

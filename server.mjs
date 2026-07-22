@@ -13,7 +13,7 @@ import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { generateMobileToken, hashMobilePassword, hashMobileSecret, isLoopbackAddress, parseBearerToken, validateMobileCredentials, verifyMobilePassword } from './mobile-auth-domain.mjs';
 import { nativeFolderPickerSupported, parseNativeFolderPickerOutput, windowsFolderPickerInvocation } from './native-folder-picker-domain.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
-import { deliveryArtifactGuidance, verificationSnapshotProblem } from './task-delivery-domain.mjs';
+import { deliveryArtifactGuidance, taskArtifactDescriptor, verificationSnapshotProblem } from './task-delivery-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
@@ -1249,6 +1249,51 @@ function runShell(command, cwd, timeoutMs) {
 async function git(args, cwd = root, timeoutMs) { return run('git', args, cwd, timeoutMs); }
 async function gitReady(cwd = root) { try { await git(['rev-parse', '--is-inside-work-tree'], cwd); await git(['rev-parse', '--verify', 'HEAD'], cwd); return true; } catch { return false; } }
 async function gitClean(cwd = root) { return (await git(['status', '--porcelain'], cwd)).stdout.trim() === ''; }
+
+async function taskArtifactCommit(task, workspaceRoot) {
+  if (task.verified_commit) return task.verified_commit;
+  if (task.worktree && await exists(task.worktree)) return (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
+  if (task.branch) return (await git(['rev-parse', task.branch], workspaceRoot)).stdout.trim();
+  return null;
+}
+
+async function listTaskArtifacts(task) {
+  const workspaceRoot = workspaceForEntity(task).git_root;
+  const commit = await taskArtifactCommit(task, workspaceRoot);
+  if (!commit) return { taskId: task.id, status: task.status, commit: null, projectLocation: task.worktree || workspaceRoot, artifacts: [] };
+  const artifacts = (await Promise.all(task.files.map(async ownedPath => {
+    const descriptor = taskArtifactDescriptor(ownedPath);
+    try {
+      const object = `${commit}:${descriptor.path}`;
+      const [type, size] = await Promise.all([
+        git(['cat-file', '-t', object], workspaceRoot),
+        git(['cat-file', '-s', object], workspaceRoot),
+      ]);
+      if (type.stdout.trim() !== 'blob') return null;
+      return { ...descriptor, size: Number(size.stdout.trim()) || 0 };
+    } catch {
+      return null;
+    }
+  }))).filter(Boolean);
+  const kindOrder = { document: 0, guide: 1, launcher: 2, source: 3 };
+  artifacts.sort((left, right) => Number(right.primary) - Number(left.primary)
+    || (kindOrder[left.kind] ?? 9) - (kindOrder[right.kind] ?? 9)
+    || left.path.localeCompare(right.path));
+  return { taskId: task.id, status: task.status, commit, projectLocation: task.worktree || workspaceRoot, artifacts };
+}
+
+async function readTaskArtifact(task, requestedPath) {
+  const listing = await listTaskArtifacts(task);
+  const path = taskArtifactDescriptor(requestedPath).path;
+  const artifact = listing.artifacts.find(item => item.path === path);
+  if (!artifact) throw httpError('TASK_ARTIFACT_NOT_FOUND', 404, 'The requested task artifact is not available at the verified commit.');
+  if (!artifact.text) throw httpError('TASK_ARTIFACT_BINARY', 415, 'This artifact cannot be previewed as text.');
+  if (artifact.size > 512 * 1024) throw httpError('TASK_ARTIFACT_TOO_LARGE', 413, 'This artifact is too large for inline preview.');
+  const workspaceRoot = workspaceForEntity(task).git_root;
+  const content = (await git(['show', `${listing.commit}:${artifact.path}`], workspaceRoot)).stdout;
+  return { taskId: task.id, status: task.status, commit: listing.commit, projectLocation: listing.projectLocation, artifact, content };
+}
+
 async function repositorySnapshot(cwd) {
   const [head, status] = await Promise.all([
     git(['rev-parse', 'HEAD'], cwd),
@@ -3076,6 +3121,12 @@ async function api(request, response, url) {
     if (request.method === 'GET' && !action) return send(response, 200, { ...run, tasks: runTasks(id), events: db.prepare('SELECT * FROM events WHERE run_id = ? ORDER BY at DESC').all() });
     if (request.method === 'POST' && action === 'publish') return send(response, 200, await publishRun(run, await body(request)));
     if (request.method === 'POST' && action === 'refresh') return send(response, 200, await refreshRunCi(run));
+  }
+  const taskArtifactsMatch = url.pathname.match(/^\/api\/tasks\/(T-\d+)\/artifacts$/);
+  if (taskArtifactsMatch && request.method === 'GET') {
+    const task = requireTask(taskArtifactsMatch[1]);
+    const requestedPath = url.searchParams.get('path');
+    return send(response, 200, requestedPath ? await readTaskArtifact(task, requestedPath) : await listTaskArtifacts(task));
   }
   const logMatch = url.pathname.match(/^\/api\/tasks\/(T-\d+)\/logs$/);
   if (logMatch && request.method === 'GET') {

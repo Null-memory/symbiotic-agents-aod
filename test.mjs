@@ -594,6 +594,13 @@ try {
   assert.equal(groupTask.attempts, 1);
   assert.notEqual(groupTask.verified_commit, groupTask.base_commit);
   assert.equal((await run('git', ['status', '--porcelain', '--untracked-files=all'], groupTask.worktree)).trim(), '');
+  const groupArtifacts = await api(`/api/tasks/${groupTask.id}/artifacts`);
+  assert.equal(groupArtifacts.commit, groupTask.verified_commit);
+  assert.equal(groupArtifacts.artifacts.some(artifact => artifact.path === 'group-output.md'), true);
+  const groupArtifactPreview = await api(`/api/tasks/${groupTask.id}/artifacts?path=group-output.md`);
+  assert.equal(groupArtifactPreview.content, 'group execution output\n');
+  const undeclaredArtifact = await apiFailure(`/api/tasks/${groupTask.id}/artifacts?path=README.md`);
+  assert.match(undeclaredArtifact.error, /not available/i);
   const roleSession = await api(`/api/group-sessions/${groupSession.id}`);
   assert.equal(roleSession.status, 'awaiting_merge');
   assert.equal(roleSession.assignments[0].stage, 'passed');

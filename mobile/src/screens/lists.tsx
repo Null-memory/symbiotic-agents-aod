@@ -16,7 +16,14 @@ export function RunsScreen() {
   const { data, refresh, body, connected, connectionPhase } = useListScreen();
   if (body) return <Screen scroll={false}>{body}</Screen>;
   const runs = data?.runs || [];
-  return <Screen refreshing={false} onRefresh={refresh}><Header eyebrow="LOCAL ORCHESTRATION" title="运行中心" action={<StatusPill value={connectionLabel(connectionPhase)} tone={connected ? 'accent' : 'warning'} />} /><View style={styles.metricsRow}><Metric label="运行" value={String(data?.stats?.runs ?? 0)} /><Metric label="任务" value={String(data?.stats?.total ?? 0)} /><Metric label="待合并" value={String(data?.stats?.mergeReady ?? 0)} /></View>{runs.length ? runs.map(run => <Card key={run.id} onPress={() => router.push({ pathname: '/detail/[type]', params: { type: 'run', id: run.id } })}><View style={styles.cardLine}><Text style={styles.cardTitle} numberOfLines={2}>{run.title || run.requirement || run.id}</Text><StatusPill value={statusLabel(run.status)} tone={statusTone(run.status)} /></View><Text style={styles.meta}>{run.id} · {run.integration_branch || '未创建集成分支'}</Text><Text style={styles.description} numberOfLines={2}>{run.requirement || '暂无需求描述'}</Text></Card>) : <EmptyState title="还没有运行" copy="在桌面端创建需求并确认 DAG 后，运行会显示在这里。" />}</Screen>;
+  return <Screen refreshing={false} onRefresh={refresh}><Header eyebrow="LOCAL ORCHESTRATION" title="运行中心" action={<StatusPill value={connectionLabel(connectionPhase)} tone={connected ? 'accent' : 'warning'} />} /><View style={styles.metricsRow}><Metric label="运行" value={String(data?.stats?.runs ?? 0)} /><Metric label="任务" value={String(data?.stats?.total ?? 0)} /><Metric label="待合并" value={String(data?.stats?.mergeReady ?? 0)} /></View>{runs.length ? runs.map(run => { const displayStatus = effectiveRunStatus(run, data?.tasks || []); return <Card key={run.id} onPress={() => router.push({ pathname: '/detail/[type]', params: { type: 'run', id: run.id } })}><View style={styles.cardLine}><Text style={styles.cardTitle} numberOfLines={2}>{run.title || run.requirement || run.id}</Text><StatusPill value={statusLabel(displayStatus)} tone={statusTone(displayStatus)} /></View><Text style={styles.meta}>{run.id} · {run.integration_branch || '未创建集成分支'}</Text><Text style={styles.description} numberOfLines={2}>{displayStatus === 'awaiting_merge' ? '任务已完成，等待你确认合并。' : run.requirement || '暂无需求描述'}</Text></Card>; }) : <EmptyState title="还没有运行" copy="在桌面端创建需求并确认 DAG 后，运行会显示在这里。" />}</Screen>;
+}
+
+function effectiveRunStatus(run: any, tasks: any[]) {
+  const runTasks = tasks.filter(task => task.run_id === run.id);
+  if (runTasks.some(task => task.status === 'recovery_required')) return 'recovery_required';
+  if (runTasks.length && runTasks.some(task => task.status === 'merge_ready') && runTasks.every(task => ['merge_ready', 'merged'].includes(task.status))) return 'awaiting_merge';
+  return run.ci_status || run.status || 'unknown';
 }
 
 export function GroupsScreen() {

@@ -18,3 +18,30 @@ export function verificationSnapshotProblem({ baseCommit, headCommit, porcelain,
   }
   return null;
 }
+
+const documentExtensions = new Set(['.md', '.txt', '.json', '.csv', '.html', '.pdf', '.docx', '.pptx', '.xlsx']);
+const textExtensions = new Set(['.md', '.txt', '.json', '.csv', '.html', '.xml', '.yaml', '.yml', '.log', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.cmd', '.bat', '.ps1', '.sh']);
+const launcherExtensions = new Set(['.cmd', '.bat', '.ps1', '.sh']);
+
+export function taskArtifactDescriptor(value) {
+  const path = String(value || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
+  const name = path.split('/').pop() || path;
+  const dot = name.lastIndexOf('.');
+  const extension = dot >= 0 ? name.slice(dot).toLowerCase() : '';
+  const outputDirectory = /^(outputs?|artifacts?|deliverables?)\//i.test(path);
+  const kind = /^readme(?:\.|$)/i.test(name)
+    ? 'guide'
+    : launcherExtensions.has(extension)
+      ? 'launcher'
+      : documentExtensions.has(extension)
+        ? 'document'
+        : 'source';
+  return {
+    path,
+    name,
+    extension,
+    kind,
+    text: textExtensions.has(extension),
+    primary: outputDirectory || kind === 'document',
+  };
+}

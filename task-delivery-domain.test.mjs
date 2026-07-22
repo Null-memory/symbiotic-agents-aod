@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { deliveryArtifactGuidance, verificationSnapshotProblem } from './task-delivery-domain.mjs';
+import { deliveryArtifactGuidance, taskArtifactDescriptor, verificationSnapshotProblem } from './task-delivery-domain.mjs';
 
 test('blocks verification when the task worktree contains uncommitted artifacts', () => {
   assert.match(verificationSnapshotProblem({
@@ -33,4 +33,13 @@ test('defines document and runnable engineering delivery requirements', () => {
   assert.match(guidance, /project location/i);
   assert.match(guidance, /install and start commands/i);
   assert.match(guidance, /one-click startup script/i);
+});
+
+test('classifies task-owned delivery artifacts for the console', () => {
+  assert.deepEqual(taskArtifactDescriptor('outputs/report.md'), {
+    path: 'outputs/report.md', name: 'report.md', extension: '.md', kind: 'document', text: true, primary: true,
+  });
+  assert.equal(taskArtifactDescriptor('scripts/run.cmd').kind, 'launcher');
+  assert.equal(taskArtifactDescriptor('scripts/README.md').kind, 'guide');
+  assert.equal(taskArtifactDescriptor('src/index.ts').kind, 'source');
 });
