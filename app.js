@@ -749,9 +749,9 @@ function renderMobileConnectionStatus(status) {
   if (!panel || !button) return;
   const state = status.reachable ? 'READY' : status.enabled ? 'CHECK CONFIG' : 'DISABLED';
   const message = status.reachable
-    ? `手机可通过 ${status.publicUrl} 连接，使用下方账号密码登录。请确保 Windows 防火墙允许 AOD 端口。`
+    ? `手机可通过 Tailscale 连接 ${status.publicUrl}，使用下方账号密码登录。请确保 Windows 防火墙允许 AOD 端口。`
     : status.enabled
-      ? '移动服务已开启，但没有可显示的公开地址。可在下方填写局域网、Tailscale 或 VPN 地址，并检查 Windows 防火墙。'
+      ? '移动服务已开启，但没有可访问的 Tailscale 地址。可在下方填写公开地址，或检查 Tailscale 与 Windows 防火墙。'
       : '移动连接当前关闭。可直接在下方开启，AOD 会自动切换为对应监听地址。';
   panel.innerHTML = `<span class="status-pill ${status.reachable ? '' : 'warning'}">${state}</span><p>${escapeHtml(message)}</p>`;
   button.disabled = false;
