@@ -11,16 +11,18 @@ const secondaryWorkspace = await mkdtemp(join(tmpdir(), 'aod-workspace-b-'));
 const secondaryNestedFolder = join(secondaryWorkspace, 'packages', 'demo');
 const port = 4928;
 const remoteHost = Object.values(networkInterfaces()).flat().find(item => item && (item.family === 'IPv4' || item.family === 4) && !item.internal)?.address || null;
-const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'native-folder-picker-domain.mjs', 'mobile-auth-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
+const files = ['.gitignore', 'server.mjs', 'agent-profile-domain.mjs', 'native-folder-picker-domain.mjs', 'mobile-auth-domain.mjs', 'approval-domain.mjs', 'process-domain.mjs', 'group-domain.mjs', 'group-schema.mjs', 'task-delivery-domain.mjs', 'workspace-domain.mjs', 'app.js', 'index.html', 'styles.css', 'package.json', 'README.md', 'aod.config.example.json'];
 for (const file of files) await cp(join(process.cwd(), file), join(fixture, file));
 
 function run(command, args, cwd = fixture) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+    let stdout = '';
     let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', reject);
-    child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `${command} exited with ${code}`)));
+    child.on('close', code => code === 0 ? resolve(stdout) : reject(new Error(stderr || `${command} exited with ${code}`)));
   });
 }
 async function waitForHealth() {
@@ -298,6 +300,11 @@ try {
   const hybrid = await api('/api/settings', { method: 'POST', body: JSON.stringify({ mode: 'hybrid', maxConcurrency: 2 }) });
   assert.equal(hybrid.tasks.find(task => task.id === first.id).status, 'ready');
   await stat(hybrid.tasks.find(task => task.id === first.id).worktree);
+  const firstHandoff = await readFile(join(fixture, '.aod', 'handoffs', `${first.id}.md`), 'utf8');
+  assert.match(firstHandoff, /requested format/i);
+  assert.match(firstHandoff, /Markdown \(\.md\)/i);
+  assert.match(firstHandoff, /project location/i);
+  assert.match(firstHandoff, /one-click startup script/i);
   assert.equal(await stat(join(fixture, '.aod', 'orchestrator.db')).then(() => true), true);
   await api(`/api/tasks/${first.id}/start`, { method: 'POST', body: '{}' });
   assert.equal((await waitForTaskStatus(first.id, 'merge_ready')).last_exit_code, 0);
@@ -585,6 +592,8 @@ try {
   const groupTask = await waitForTaskStatus(groupRun.tasks[0].id, 'merge_ready');
   assert.equal(groupTask.agent, 'codex');
   assert.equal(groupTask.attempts, 1);
+  assert.notEqual(groupTask.verified_commit, groupTask.base_commit);
+  assert.equal((await run('git', ['status', '--porcelain', '--untracked-files=all'], groupTask.worktree)).trim(), '');
   const roleSession = await api(`/api/group-sessions/${groupSession.id}`);
   assert.equal(roleSession.status, 'awaiting_merge');
   assert.equal(roleSession.assignments[0].stage, 'passed');

@@ -13,6 +13,7 @@ import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { generateMobileToken, hashMobilePassword, hashMobileSecret, isLoopbackAddress, parseBearerToken, validateMobileCredentials, verifyMobilePassword } from './mobile-auth-domain.mjs';
 import { nativeFolderPickerSupported, parseNativeFolderPickerOutput, windowsFolderPickerInvocation } from './native-folder-picker-domain.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
+import { deliveryArtifactGuidance, verificationSnapshotProblem } from './task-delivery-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
@@ -1615,7 +1616,8 @@ async function writeHandoff(task) {
     `# ${task.id}: ${task.title}`, '', `Agent: ${task.agent}`, `Branch: ${task.branch}`, `Worktree: ${task.worktree}`, '',
     '## Owned paths', ...task.files.map(file => `- ${file}`), '', '## Dependencies', task.dependsOn.length ? task.dependsOn.map(id => `- ${id}`).join('\n') : '- None', '',
     '## Acceptance command', task.acceptance || 'Not specified', '',
-    'Commit changes in this branch. Do not modify paths outside the ownership list. Report changed files, commit SHA, test output, and residual risks.'
+    '## Delivery requirements', deliveryArtifactGuidance(), '',
+    'Commit changes in this branch. Before finishing, inspect git status and commit every owned change, including pre-existing untracked files. Do not modify paths outside the ownership list. Report changed files, commit SHA, test output, project location, usage or start commands, and residual risks.'
   ].join('\n');
   await writeFile(join(handoffDir, `${task.id}.md`), `${handoff}\n`, 'utf8');
 }
@@ -1648,7 +1650,7 @@ function groupTurnPrompt(session, member, round, phase, allowedAcceptancePrefixe
   return [
     `Group session: ${session.id}`, `Requirement: ${session.requirement}`, `Round: ${round}/${session.max_rounds}`, `Phase: ${phase}`,
     `You are ${member.displayName}, role ${member.role}.`, member.instructions ? `Responsibilities: ${member.instructions}` : '',
-    'Roster:', roster, '', objectives[phase], groupPhaseResponseGuidance(phase), acceptanceCommandGuidance(allowedAcceptancePrefixes), schema,
+    'Roster:', roster, '', objectives[phase], groupPhaseResponseGuidance(phase), acceptanceCommandGuidance(allowedAcceptancePrefixes), deliveryArtifactGuidance(), schema,
     '', 'Discussion so far:', recentGroupContext(session.id, phase) || '(none)'
   ].filter(Boolean).join('\n');
 }
@@ -2061,17 +2063,27 @@ async function verifyTask(task, source = 'manual') {
   if (task.status !== 'verifying') throw new Error('Only tasks in verification can run acceptance checks.');
   if (!task.worktree || !(await exists(task.worktree))) throw new Error('This task has no prepared worktree.');
   if (!task.acceptance) throw new Error('Add an acceptance command before verification.');
-  const commit = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
+  const roleAssignment = getTaskRoleAssignment(task.id);
+  const [headResult, statusResult] = await Promise.all([
+    git(['rev-parse', 'HEAD'], task.worktree),
+    git(['status', '--porcelain', '--untracked-files=all'], task.worktree),
+  ]);
+  const commit = headResult.stdout.trim();
   try {
+    const snapshotProblem = verificationSnapshotProblem({
+      baseCommit: task.base_commit,
+      headCommit: commit,
+      porcelain: statusResult.stdout,
+      requiresCommit: Boolean(roleAssignment),
+    });
+    if (snapshotProblem) throw new Error(snapshotProblem);
     const result = await runShell(task.acceptance, task.worktree, task.timeout_ms);
-    const roleAssignment = getTaskRoleAssignment(task.id);
     updateTask(task.id, { status: roleAssignment ? 'reviewing' : 'merge_ready', verified_commit: commit, verification: { at: now(), command: task.acceptance, output: redactSecrets(`${result.stdout}${result.stderr}`).slice(-8000), commit }, recovery_note: null });
     if (roleAssignment) updateTaskRoleAssignment(task.id, { stage: 'reviewing', review_commit: commit });
     appendEvent('verify', `${task.id} acceptance check passed (${source})`, task.id);
     if (roleAssignment) scheduleGroupAdvance();
     return getTask(task.id);
   } catch (error) {
-    const roleAssignment = getTaskRoleAssignment(task.id);
     const verification = { at: now(), command: task.acceptance, output: redactSecrets(error instanceof Error ? error.message : 'Verification failed.'), commit };
     if (roleAssignment?.fixer_member_id && roleAssignment.repair_count < roleAssignment.max_repairs) {
       updateTaskRoleAssignment(task.id, { stage: 'repairing', review: { decision: 'changes_requested', summary: 'Acceptance failed.', findings: [verification.output] } });
@@ -2367,7 +2379,10 @@ async function inspectGroupTask(task) {
     const diff = (await git(['diff', '--stat', `${task.base_commit}..${task.verified_commit}`], area)).stdout;
     const prompt = [
       `Review task ${task.id}: ${task.title}`, `Commit: ${task.verified_commit}`, `Acceptance: ${task.acceptance}`,
+      `Requirement: ${session.requirement}`, `Owned paths: ${task.files.join(', ')}`,
       'Inspect this detached worktree. Do not modify the task branch.',
+      deliveryArtifactGuidance(),
+      'Request changes when a requested document artifact is missing or uses the wrong format, when a summary exists only in stdout, or when runnable engineering work lacks usable startup documentation or a practical startup script within its declared scope.',
       'Return JSON only: {"decision":"pass|changes_requested","summary":"...","findings":["..."]}', '', diff
     ].join('\n');
     const output = await runRoleAdapter(task, reviewer, 'review', prompt, area);
@@ -2418,10 +2433,13 @@ async function repairGroupTask(task) {
   const prompt = [
     `Repair task ${task.id}: ${task.title}`, `Worktree: ${task.worktree}`,
     'Apply the smallest fix for the reviewer findings, run focused checks, and commit the changes.',
+    deliveryArtifactGuidance(),
+    'Before finishing, inspect git status and commit all owned changes, including pre-existing untracked files.',
     'Do not modify files outside the owned paths.', '', JSON.stringify(assignment.review || {}, null, 2)
   ].join('\n');
   try {
     await runRoleAdapter(task, fixer, 'repair', prompt, task.worktree);
+    await rm(join(task.worktree, '.aod-repair-prompt.md'), { force: true });
     if (getGroupSession(session.id)?.status === 'cancelled') return getTask(task.id);
     const after = (await git(['rev-parse', 'HEAD'], task.worktree)).stdout.trim();
     if (after === before) throw new Error('Fixer completed without creating a new commit.');
@@ -2524,6 +2542,8 @@ async function planWithCodex(requirement, planner = 'codex', workspaceId = activ
     'Return JSON only, no markdown. Use this shape:',
     '{"title":"short run title","tasks":[{"key":"api","title":"...","agent":"codex|claude-code|antigravity","files":["path"],"dependsOn":["key"],"acceptance":"npm run check","risk":"short risk"}]}',
     'Tasks must have disjoint file ownership and an acyclic dependency graph. Every task needs a concrete acceptance command.',
+    deliveryArtifactGuidance(),
+    'Include document artifacts, usage documentation, and practical startup scripts in task file ownership so executors can commit them without crossing task boundaries.',
     '', `Requirement:\n${requirement}`
   ].join('\n');
   const args = adapter.args.map(value => String(value).replaceAll('{{prompt}}', prompt).replaceAll('{{worktree}}', workspaceRoot).replaceAll('{{taskId}}', 'planner').replaceAll('{{promptFile}}', ''));
