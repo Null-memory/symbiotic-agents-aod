@@ -5,6 +5,7 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
+    "preview": "node preview-server.mjs",
     "android": "expo start --android",
     "android:run": "expo run:android",
     "android:apk": "npx eas-cli@latest build --platform android --profile preview",
