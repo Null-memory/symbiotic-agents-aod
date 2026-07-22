@@ -20,16 +20,16 @@ npm start
 
 ## Android 移动端
 
-移动端位于 `mobile/`，使用 Expo Android 客户端连接桌面 AOD 服务。第一版默认关闭远程访问；需要先在 Windows 安装并登录 Tailscale，然后用新的进程环境启动 AOD：
+移动端位于 `mobile/`，使用 Expo Android 客户端连接桌面 AOD 服务。第一版默认关闭远程访问；需要先允许移动端监听局域网、Tailscale 或 VPN 地址，然后用新的进程环境启动 AOD：
 
 ```powershell
 $env:AOD_MOBILE_ENABLED = "1"
 $env:AOD_BIND_HOST = "0.0.0.0"
-$env:AOD_PUBLIC_URL = "http://100.x.x.x:4821"
+$env:AOD_PUBLIC_URL = "http://192.168.x.x:4830"
 npm start
 ```
 
-将 `100.x.x.x` 替换为 Windows 在 Tailscale 中的地址，并在 Windows 防火墙中允许对应端口。桌面端点击顶栏“手机连接”，先设置一个移动账号；Android App 输入 AOD 地址、用户名和密码登录。登录成功后会保存独立设备令牌，设备仍可在桌面端撤销。移动端与 Windows 必须同时在线，GitHub CLI 登录仍在桌面端完成。
+将 `AOD_PUBLIC_URL` 替换为桌面端“手机连接”里显示的可访问地址；同一 Wi-Fi 下通常是 Windows 的局域网地址，远程网络可使用 Tailscale 或 VPN 地址。需要在 Windows 防火墙中允许对应端口。桌面端点击顶栏“手机连接”，先设置一个移动账号；Android App 输入 AOD 地址、用户名和密码登录。登录成功后会保存独立设备令牌，设备仍可在桌面端撤销。移动端与 Windows 必须同时在线，GitHub CLI 登录仍在桌面端完成。
 
 移动端开发命令：
 

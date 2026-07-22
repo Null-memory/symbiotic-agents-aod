@@ -1,6 +1,6 @@
 # AOD Mobile
 
-Android client for the local AOD orchestrator. It connects to a Windows-hosted AOD instance over Tailscale and stores the device session in Android secure storage.
+Android client for the local AOD orchestrator. It connects to a Windows-hosted AOD instance over LAN, Tailscale, or VPN, and stores the device session in Android secure storage.
 
 ## Development
 
@@ -26,7 +26,7 @@ avoiding browser CORS errors without changing the production AOD API policy.
 The preview server binds to loopback by default. Do not expose it to a LAN or
 Tailscale network because it is intended only for local emulator testing.
 
-Use the desktop console's **手机连接** dialog to enable mobile access, set the mobile account, and obtain the Tailscale URL. The Android client signs in with that URL, account, and password.
+Use the desktop console's **手机连接** dialog to enable mobile access, set the mobile account, and obtain the reachable AOD URL. The Android client signs in with that URL, account, and password. For a physical phone on the same Wi-Fi, use the Windows LAN address shown there, such as `http://192.168.1.10:4830`; `127.0.0.1` and emulator-only addresses such as `10.0.2.2` will not work on a real phone.
 
 ## Release Builds
 
