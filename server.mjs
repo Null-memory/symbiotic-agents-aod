@@ -13,7 +13,7 @@ import { migrateAgentGroupMembers } from './group-schema.mjs';
 import { generateMobileToken, hashMobilePassword, hashMobileSecret, isLoopbackAddress, parseBearerToken, validateMobileCredentials, verifyMobilePassword } from './mobile-auth-domain.mjs';
 import { nativeFolderPickerSupported, parseNativeFolderPickerOutput, windowsFolderPickerInvocation } from './native-folder-picker-domain.mjs';
 import { agentStreamBatchTiming, boundAgentStreamDetail, buildProcessMetrics, classifyInterruptedProcess, createAgentStreamParser, createFlushRegistry, createTextBatcher, dispatchAgentStreamEvent, normalizeAgentUsage } from './process-domain.mjs';
-import { deliveryArtifactGuidance, taskArtifactDescriptor, verificationSnapshotProblem } from './task-delivery-domain.mjs';
+import { deliveryArtifactGuidance, resolveArtifactRevealTarget, taskArtifactDescriptor, verificationSnapshotProblem, windowsExplorerRevealInvocation } from './task-delivery-domain.mjs';
 import { didRepositorySnapshotChange, requireAbsoluteDirectoryPath, workspaceIdentity, workspacePathKey } from './workspace-domain.mjs';
 
 const root = resolve(process.cwd());
@@ -1292,6 +1292,42 @@ async function readTaskArtifact(task, requestedPath) {
   const workspaceRoot = workspaceForEntity(task).git_root;
   const content = (await git(['show', `${listing.commit}:${artifact.path}`], workspaceRoot)).stdout;
   return { taskId: task.id, status: task.status, commit: listing.commit, projectLocation: listing.projectLocation, artifact, content };
+}
+
+async function openWindowsExplorer(targetPath, selectFile = false) {
+  if (process.platform !== 'win32') throw httpError('WINDOWS_EXPLORER_UNAVAILABLE', 409, 'Windows Explorer integration is available only on Windows.');
+  const invocation = windowsExplorerRevealInvocation(targetPath, selectFile);
+  await new Promise((resolveProcess, rejectProcess) => {
+    const child = spawn(invocation.command, invocation.args, { shell: false, windowsHide: false, detached: true, stdio: 'ignore' });
+    child.once('spawn', () => { child.unref(); resolveProcess(); });
+    child.once('error', rejectProcess);
+  });
+}
+
+async function revealRunArtifacts(run) {
+  const target = run.integration_worktree;
+  if (!target || !(await exists(target))) throw httpError('RUN_ARTIFACT_LOCATION_MISSING', 409, 'The run integration directory is not available on disk.');
+  await openWindowsExplorer(target);
+  return { opened: true, path: target };
+}
+
+async function revealTaskArtifact(task, requestedPath) {
+  const listing = await listTaskArtifacts(task);
+  const path = taskArtifactDescriptor(requestedPath).path;
+  if (!listing.artifacts.some(item => item.path === path)) throw httpError('TASK_ARTIFACT_NOT_FOUND', 404, 'The requested task artifact is not available at the verified commit.');
+  const roots = [];
+  if (task.run_id && ['merged', 'completed'].includes(task.status)) {
+    const run = requireRun(task.run_id);
+    if (run.integration_worktree) roots.push(run.integration_worktree);
+  }
+  if (task.worktree) roots.push(task.worktree);
+  for (const rootPath of [...new Set(roots)]) {
+    const target = resolveArtifactRevealTarget(rootPath, path);
+    if (!(await exists(target))) continue;
+    await openWindowsExplorer(target, true);
+    return { opened: true, path: target };
+  }
+  throw httpError('TASK_ARTIFACT_LOCATION_MISSING', 409, 'The verified artifact exists in Git, but no current worktree contains the file.');
 }
 
 async function repositorySnapshot(cwd) {
@@ -3114,19 +3150,28 @@ async function api(request, response, url) {
     const run = await createRunFromPlan(plan, { title: payload.title, tasks: payload.tasks });
     return send(response, 201, { ...run, tasks: runTasks(run.id) });
   }
-  const runMatch = url.pathname.match(/^\/api\/runs\/(RUN-[\w-]+)(?:\/(publish|refresh))?$/);
+  const runMatch = url.pathname.match(/^\/api\/runs\/(RUN-[\w-]+)(?:\/(publish|refresh|reveal))?$/);
   if (runMatch) {
     const [, id, action] = runMatch;
     const run = requireRun(id);
     if (request.method === 'GET' && !action) return send(response, 200, { ...run, tasks: runTasks(id), events: db.prepare('SELECT * FROM events WHERE run_id = ? ORDER BY at DESC').all() });
     if (request.method === 'POST' && action === 'publish') return send(response, 200, await publishRun(run, await body(request)));
     if (request.method === 'POST' && action === 'refresh') return send(response, 200, await refreshRunCi(run));
+    if (request.method === 'POST' && action === 'reveal') {
+      if (!request.mobileContext.local) throw httpError('DESKTOP_LOCAL_ONLY', 403, 'Windows Explorer can be opened only from the local desktop console.');
+      return send(response, 200, await revealRunArtifacts(run));
+    }
   }
-  const taskArtifactsMatch = url.pathname.match(/^\/api\/tasks\/(T-\d+)\/artifacts$/);
-  if (taskArtifactsMatch && request.method === 'GET') {
+  const taskArtifactsMatch = url.pathname.match(/^\/api\/tasks\/(T-\d+)\/artifacts(?:\/(reveal))?$/);
+  if (taskArtifactsMatch && request.method === 'GET' && !taskArtifactsMatch[2]) {
     const task = requireTask(taskArtifactsMatch[1]);
     const requestedPath = url.searchParams.get('path');
     return send(response, 200, requestedPath ? await readTaskArtifact(task, requestedPath) : await listTaskArtifacts(task));
+  }
+  if (taskArtifactsMatch && request.method === 'POST' && taskArtifactsMatch[2] === 'reveal') {
+    if (!request.mobileContext.local) throw httpError('DESKTOP_LOCAL_ONLY', 403, 'Windows Explorer can be opened only from the local desktop console.');
+    const task = requireTask(taskArtifactsMatch[1]);
+    return send(response, 200, await revealTaskArtifact(task, (await body(request)).path));
   }
   const logMatch = url.pathname.match(/^\/api\/tasks\/(T-\d+)\/logs$/);
   if (logMatch && request.method === 'GET') {
@@ -3198,7 +3243,7 @@ const publicFiles = new Set([
   'index.html', 'styles.css', 'app.js',
   'styles/tokens.css', 'styles/shell.css', 'styles/components.css', 'styles/views.css',
   'ui/api.js', 'ui/state.js', 'ui/layout-state.js', 'ui/layout.js', 'ui/context-dock.js',
-  'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js',
+  'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js', 'ui/work-launcher.js',
   'ui/run-center.js', 'ui/group-console.js', 'ui/dialogs.js', 'ui/workspaces.js'
 ]);
 async function staticFile(response, pathname) {

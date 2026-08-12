@@ -20,6 +20,12 @@
   --radius-panel:8px;
   --radius-control:6px;
   --shadow-float:0 14px 34px rgba(24,36,40,.14);
+  --shadow-material:0 10px 28px rgba(24,36,40,.08),0 1px 1px rgba(24,36,40,.05);
+  --material-panel:rgba(255,255,255,.82);
+  --material-panel-strong:rgba(255,255,255,.92);
+  --material-live:rgba(24,35,38,.92);
+  --ease-fluid:cubic-bezier(.2,.72,.2,1);
+  --ease-press:cubic-bezier(.18,.8,.22,1);
   --motion-fast:120ms;
   --motion-tab:160ms;
   --motion-open:200ms;

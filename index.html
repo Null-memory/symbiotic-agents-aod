@@ -52,7 +52,7 @@
           <section class="workspace-view active" data-view-panel="runs">
             <header class="page-heading">
               <div><p class="kicker">LOCAL ORCHESTRATION</p><h1>运行中心</h1><p id="modeDescription">Loading</p></div>
-              <div class="page-actions"><button class="secondary" id="openTaskDialog" type="button">单个任务</button><button class="primary" id="openRunDialog" type="button">新建需求</button></div>
+              <div class="page-actions"><button class="primary work-launcher-entry" id="openRunDialog" type="button">发起工作</button><button class="secondary" id="openTaskDialog" type="button">快速任务</button></div>
             </header>
 
             <section class="run-command-band" aria-label="当前运行阶段与下一动作">
@@ -113,7 +113,7 @@
           </section>
 
           <section class="workspace-view" data-view-panel="tasks">
-            <header class="page-heading"><div><p class="kicker">TASK TOPOLOGY</p><h1>任务队列</h1><p>查看文件边界、依赖、执行状态与验收门禁。</p></div><div class="page-actions"><button class="primary" id="openTaskDialogFromTasks" type="button">新建任务</button></div></header>
+            <header class="page-heading"><div><p class="kicker">TASK TOPOLOGY</p><h1>任务队列</h1><p>查看文件边界、依赖、执行状态与验收门禁。</p></div><div class="page-actions"><button class="primary" id="openTaskDialogFromTasks" type="button">发起任务</button></div></header>
             <div class="view-host" data-view-host="tasks"></div>
           </section>
 
@@ -202,13 +202,62 @@
       <div class="dialog-actions"><button class="secondary" id="refreshMobileDevices" type="button">刷新设备</button><button class="secondary" id="cancelMobileConnection" type="button">关闭</button></div>
     </dialog>
 
+    <dialog class="artifact-dialog" id="artifactDialog" aria-labelledby="artifactDialogTitle">
+      <div class="dialog-head artifact-dialog-head">
+        <div><p class="kicker">LOCAL DELIVERABLES</p><h2 id="artifactDialogTitle">运行成果</h2></div>
+        <div class="artifact-dialog-head-meta"><span class="status-pill" id="artifactRunStatus">LOADING</span><button class="icon-button" id="closeArtifactDialog" type="button" aria-label="关闭成果窗口" title="关闭">×</button></div>
+      </div>
+      <section class="artifact-run-strip" aria-label="运行成果位置">
+        <div><span>RUN INTEGRATION DIRECTORY</span><strong>运行集成目录</strong></div>
+        <code id="artifactRunPath">正在读取...</code>
+        <div class="artifact-run-actions"><button class="primary compact" id="openArtifactRunPath" type="button">打开目录</button><button class="secondary compact" id="copyArtifactRunPath" type="button">复制路径</button></div>
+      </section>
+      <div class="artifact-browser">
+        <aside class="artifact-list-pane" aria-labelledby="artifactListTitle">
+          <div class="artifact-pane-head"><div><span>VERIFIED FILES</span><strong id="artifactListTitle">成果文件</strong></div><b id="artifactCount">0</b></div>
+          <div class="artifact-list" id="artifactList"><p class="empty">正在汇总任务成果。</p></div>
+        </aside>
+        <section class="artifact-preview-pane" aria-labelledby="artifactPreviewTitle">
+          <div class="artifact-preview" id="artifactPreview"><div class="artifact-preview-empty"><span>ARTIFACT PREVIEW</span><strong id="artifactPreviewTitle">选择一个成果文件</strong><p>文本成果会显示已验收提交中的内容。</p></div></div>
+        </section>
+      </div>
+      <footer class="artifact-dialog-foot"><span>预览内容固定来自任务验收时的 Git commit，不受后续工作目录修改影响。</span><button class="secondary" id="dismissArtifactDialog" type="button">完成</button></footer>
+    </dialog>
+
     <dialog id="taskDialog" aria-labelledby="taskDialogTitle">
       <form method="dialog" id="taskForm"><div class="dialog-head"><div><p class="kicker">NEW UNIT OF WORK</p><h2 id="taskDialogTitle">新建协同任务</h2></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><label>任务标题<input name="title" required maxlength="100" placeholder="例如：实现任务恢复 API" /></label><label>执行 Agent<select name="agent"><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">反重力 2.0</option></select></label><label>拥有的文件或目录<input name="files" required placeholder="server.mjs, src/api" /></label><label>依赖任务<select name="dependsOn" id="dependsOn"><option value="">无</option></select></label><label>验收命令<input name="acceptance" placeholder="npm run check" /></label><div class="form-row"><label>超时分钟<input name="timeoutMinutes" type="number" min="1" max="180" value="30" /></label><label>自动重试<input name="maxRetries" type="number" min="0" max="3" value="0" /></label></div><div class="dialog-actions"><button class="secondary" value="cancel">取消</button><button class="primary" value="default">创建任务</button></div></form>
     </dialog>
 
-    <dialog id="runDialog" aria-labelledby="runDialogTitle">
-      <form method="dialog" id="runForm"><div class="dialog-head"><div><p class="kicker">PLAN A DELIVERY RUN</p><h2 id="runDialogTitle">从需求生成 DAG</h2></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><label>需求描述<textarea name="requirement" required placeholder="描述要交付的功能、范围和验收目标。"></textarea></label><label>规划器<select name="planner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label><div class="dialog-actions"><button class="secondary" value="cancel">取消</button><button class="primary" value="default">生成预览</button></div></form>
-      <section class="plan-preview" id="planPreview" hidden><div class="section-head"><div><p class="kicker">DAG PREVIEW</p><h2 id="planTitle">待确认计划</h2></div></div><p id="planRequirement" class="plan-requirement"></p><label>任务 JSON<textarea id="planTasks"></textarea></label><div class="dialog-actions"><button class="secondary" id="discardPlan" type="button">放弃</button><button class="primary" id="confirmPlan" type="button">确认创建运行</button></div></section>
+    <dialog class="work-launcher-dialog" id="runDialog" aria-labelledby="runDialogTitle">
+      <form method="dialog" id="runForm">
+        <div class="dialog-head work-launcher-head"><div><p class="kicker">WORK ORCHESTRATOR</p><h2 id="runDialogTitle">发起一项工作</h2><p>选择协作深度，后续步骤会绑定到当前项目。</p></div><button class="icon-button" id="closeRunDialog" type="button" aria-label="关闭">×</button></div>
+        <div class="launcher-project-strip"><span class="launcher-project-signal" aria-hidden="true"></span><div><small>CURRENT PROJECT</small><strong id="launcherProjectName">正在读取项目</strong><code id="launcherProjectPath">—</code></div><button class="secondary compact" id="launcherSwitchProject" type="button">切换项目</button></div>
+        <div class="launcher-mode-picker" id="launcherModePicker" role="tablist" aria-label="工作发起方式">
+          <button type="button" role="tab" data-launch-mode="group" aria-selected="false"><span>01</span><strong>群组讨论</strong><small>讨论 → 共识 → DAG → 执行</small></button>
+          <button type="button" role="tab" data-launch-mode="plan" aria-selected="false"><span>02</span><strong>智能规划</strong><small>需求 → DAG → 人工确认</small></button>
+          <button type="button" role="tab" data-launch-mode="task" aria-selected="false"><span>03</span><strong>直接任务</strong><small>需求 → 单 Agent 执行</small></button>
+        </div>
+        <label class="launcher-requirement"><span>要完成什么</span><textarea name="requirement" required maxlength="6000" placeholder="描述目标、范围、约束和期望成果。信息越具体，拆解与验收越准确。"></textarea></label>
+        <section class="launcher-options" data-launch-panel="group" hidden>
+          <div class="launcher-option-head"><div><span>TEAM DISCUSSION</span><strong>由群组先讨论实现细节</strong></div><small>适合需求复杂、需要多角色检查的工作</small></div>
+          <label>Agent 群组<select name="groupId" id="launcherGroup"></select></label>
+          <label class="launcher-toggle"><input name="startNow" type="checkbox" checked /><span><strong>创建后立即开始讨论</strong><small>这次点击即视为启动 Agent 的人工确认。</small></span></label>
+        </section>
+        <section class="launcher-options" data-launch-panel="plan" hidden>
+          <div class="launcher-option-head"><div><span>FAST PLANNING</span><strong>由规划器生成任务 DAG</strong></div><small>生成后仍需人工检查并确认</small></div>
+          <label>规划器<select name="planner"><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label>
+        </section>
+        <section class="launcher-options" data-launch-panel="task" hidden>
+          <div class="launcher-option-head"><div><span>DIRECT EXECUTION</span><strong>创建一个独立任务</strong></div><small>适合边界清楚、改动集中的工作</small></div>
+          <div class="form-row"><label>任务标题（可选）<input name="taskTitle" maxlength="100" placeholder="默认使用需求第一行" /></label><label>执行 Agent<select name="taskAgent"><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">反重力 2.0</option></select></label></div>
+          <label>拥有的文件或目录<input name="taskFiles" placeholder="例如：app.js, styles/components.css" /></label>
+          <div class="form-row"><label>依赖任务<select name="taskDependsOn" id="launcherDependsOn"><option value="">无</option></select></label><label>验收命令<input name="taskAcceptance" placeholder="例如：npm test" /></label></div>
+          <div class="form-row"><label>超时分钟<input name="taskTimeoutMinutes" type="number" min="1" max="180" value="30" /></label><label>自动重试<input name="taskMaxRetries" type="number" min="0" max="3" value="0" /></label></div>
+        </section>
+        <div class="launcher-progress" id="launcherProgress" aria-live="polite" hidden><span class="launcher-progress-signal" aria-hidden="true"></span><div><small id="launcherProgressStage">REQUEST ACCEPTED</small><strong id="launcherProgressMessage">正在提交需求</strong></div><time id="launcherProgressTime">00:00</time></div>
+        <div class="dialog-actions work-launcher-actions"><span id="launcherRouteSummary">讨论后生成可编辑 DAG，确认后执行。</span><button class="secondary" id="launcherCancel" type="button">取消</button><button class="primary" id="launcherSubmit" value="default">创建并开始讨论</button></div>
+      </form>
+      <section class="plan-preview launcher-plan-preview" id="planPreview" hidden><div class="section-head"><div><p class="kicker">DAG PREVIEW</p><h2 id="planTitle">待确认计划</h2></div><span class="status-pill">REVIEW REQUIRED</span></div><p id="planRequirement" class="plan-requirement"></p><label>任务 JSON<textarea id="planTasks"></textarea></label><div class="dialog-actions"><button class="secondary" id="discardPlan" type="button">返回修改</button><button class="primary" id="confirmPlan" type="button">确认创建运行</button></div></section>
     </dialog>
 
     <dialog class="group-dialog" id="groupDialog" aria-labelledby="groupDialogTitle">

@@ -7,6 +7,7 @@ import { createDialogs } from './ui/dialogs.js';
 import { createWorkspaceController } from './ui/workspaces.js';
 import { buildSearchIndex, searchEntities } from './ui/command-search.js';
 import { createActionState } from './ui/action-feedback.js';
+import { buildStandaloneTaskPayload, defaultLaunchMode, launchModes, launchProgressCopy, normalizeLaunchMode } from './ui/work-launcher.js';
 import { deriveNextAction, deriveRunStage } from './ui/run-stage.js';
 import { captureElementState, createRefreshScheduler, restoreElementState } from './ui/render-scheduler.js';
 
@@ -19,6 +20,7 @@ const groupsBoard = $('#groupsBoard');
 const groupDialog = $('#groupDialog');
 const groupSessionDialog = $('#groupSessionDialog');
 const groupConsole = $('#groupConsole');
+const artifactDialog = $('#artifactDialog');
 
 function mountPrimaryViews() {
   const placements = {
@@ -59,6 +61,11 @@ let commandIndex = [];
 let commandResults = [];
 let commandSelection = 0;
 let currentNextAction = null;
+let artifactBrowser = { run: null, entries: [], failures: [], selectedKey: null, requestId: 0 };
+let launcherMode = 'plan';
+let launcherProgressTimer = null;
+let launcherStartedAt = 0;
+let reopenLauncherMode = null;
 
 const statusLabels = {
   draft: '草稿', preparing: '准备中', ready: '就绪', queued: '排队中', running: '运行中', discussing: '讨论中', paused: '已暂停', synthesizing: '汇总中', awaiting_confirmation: '待确认', executing: '执行中', awaiting_merge: '待合并', reviewing: '审查中', repairing: '修复中', verifying: '验证中', merge_ready: '待合并', merging: '合并中', conflict_review: '冲突审查', recovery_required: '恢复确认', completed: '已完成', passed: '已通过', pending: '等待中', skipped: '已跳过', failed: '失败', cancelled: '已取消', merged: '已合并'
@@ -80,7 +87,12 @@ const layout = createLayout({
 const contextDock = layout.contextDock;
 const groupConsoleUi = createGroupConsole({ root: groupConsole });
 const dialogsUi = createDialogs();
-const workspaceUi = createWorkspaceController({ root: document, request, onSelected: () => refresh(), onError: error => tell(error.message, 'error') });
+const workspaceUi = createWorkspaceController({
+  root: document,
+  request,
+  onSelected: () => refresh(),
+  onError: error => tell(error.message, 'error')
+});
 const runCenterUi = createRunCenter({
   root: $('#contextInspector'), request, tell, onRefresh: refresh, getSelectedTask: selectedTask,
   onContext: (tab, taskId) => contextDock.open(tab, taskId),
@@ -164,6 +176,169 @@ function taskActions(task) {
   return actions.join('');
 }
 
+function formatArtifactSize(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function artifactKindLabel(kind) {
+  return { document: '文档', guide: '使用说明', launcher: '启动脚本', source: '工程文件' }[kind] || '文件';
+}
+
+function artifactOutputLocation(run, entry) {
+  const useIntegration = ['merged', 'completed'].includes(entry.taskStatus) && run?.integration_worktree;
+  const root = useIntegration ? run.integration_worktree : entry.projectLocation;
+  if (!root) return { root: '', path: '', label: '位置不可用' };
+  const separator = root.includes('\\') ? '\\' : '/';
+  return {
+    root,
+    path: `${root.replace(/[\\/]$/, '')}${separator}${entry.path.replaceAll('/', separator)}`,
+    label: useIntegration ? '运行集成目录' : '任务工作目录'
+  };
+}
+
+function artifactListMarkup() {
+  if (!artifactBrowser.entries.length) {
+    const reason = artifactBrowser.failures.length ? '部分任务成果读取失败，请稍后重试。' : '这个运行还没有可展示的已验收成果。';
+    return `<div class="artifact-list-empty"><strong>暂无成果文件</strong><p>${escapeHtml(reason)}</p></div>`;
+  }
+  return artifactBrowser.entries.map(entry => `
+    <button class="artifact-file ${entry.key === artifactBrowser.selectedKey ? 'active' : ''}" type="button" data-artifact-key="${escapeHtml(entry.key)}" aria-pressed="${entry.key === artifactBrowser.selectedKey}">
+      <span class="artifact-file-signal kind-${escapeHtml(entry.kind)}"></span>
+      <span class="artifact-file-copy"><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(entry.path)}</small></span>
+      <span class="artifact-file-meta">${entry.primary ? '<b>PRIMARY</b>' : ''}<em>${escapeHtml(formatArtifactSize(entry.size))}</em></span>
+    </button>`).join('');
+}
+
+function renderArtifactBrowser() {
+  const run = artifactBrowser.run;
+  if (!run) return;
+  $('#artifactDialogTitle').textContent = `${run.id} 成果`;
+  $('#artifactRunStatus').textContent = artifactBrowser.entries.length ? 'READY' : artifactBrowser.failures.length ? 'PARTIAL' : 'EMPTY';
+  $('#artifactRunStatus').classList.toggle('warning', Boolean(artifactBrowser.failures.length));
+  $('#artifactRunPath').textContent = run.integration_worktree || '运行集成目录尚未准备';
+  $('#copyArtifactRunPath').disabled = !run.integration_worktree;
+  $('#openArtifactRunPath').disabled = !run.integration_worktree;
+  $('#artifactCount').textContent = String(artifactBrowser.entries.length);
+  $('#artifactList').innerHTML = artifactListMarkup();
+
+  const entry = artifactBrowser.entries.find(item => item.key === artifactBrowser.selectedKey);
+  if (!entry) {
+    $('#artifactPreview').innerHTML = '<div class="artifact-preview-empty"><span>ARTIFACT PREVIEW</span><strong id="artifactPreviewTitle">选择一个成果文件</strong><p>文本成果会显示已验收提交中的内容。</p></div>';
+    return;
+  }
+  const location = artifactOutputLocation(run, entry);
+  let body = '<div class="artifact-preview-loading">正在读取验收快照...</div>';
+  if (!entry.text) body = '<div class="artifact-preview-empty"><span>BINARY ARTIFACT</span><strong>此文件不支持网页预览</strong><p>可复制下方路径，在本机对应应用中查看。</p></div>';
+  else if (entry.previewError) body = `<div class="artifact-preview-empty is-error"><span>PREVIEW FAILED</span><strong>预览读取失败</strong><p>${escapeHtml(entry.previewError)}</p></div>`;
+  else if (entry.content !== undefined) body = `<pre class="artifact-preview-content">${escapeHtml(entry.content)}</pre>`;
+  $('#artifactPreview').innerHTML = `
+    <header class="artifact-preview-head">
+      <div><span>${entry.primary ? 'PRIMARY ARTIFACT' : 'VERIFIED ARTIFACT'}</span><h3 id="artifactPreviewTitle">${escapeHtml(entry.name)}</h3><p>${escapeHtml(entry.path)}</p></div>
+      <span class="artifact-kind">${escapeHtml(artifactKindLabel(entry.kind))}</span>
+    </header>
+    <dl class="artifact-snapshot-meta">
+      <div><dt>任务</dt><dd>${escapeHtml(entry.taskId)} · ${escapeHtml(entry.taskTitle)}</dd></div>
+      <div><dt>验收快照</dt><dd title="${escapeHtml(entry.commit)}">${escapeHtml(shortCommit(entry.commit))}</dd></div>
+      <div><dt>大小</dt><dd>${escapeHtml(formatArtifactSize(entry.size))}</dd></div>
+    </dl>
+    <div class="artifact-file-location"><span>${escapeHtml(location.label)}</span><code title="${escapeHtml(location.path)}">${escapeHtml(location.path || '路径不可用')}</code><div class="artifact-file-actions"><button class="primary compact" type="button" data-reveal-artifact data-task-id="${escapeHtml(entry.taskId)}" data-artifact-path="${escapeHtml(entry.path)}" ${location.path ? '' : 'disabled'}>定位文件</button><button class="secondary compact" type="button" data-copy-artifact-path="${escapeHtml(location.path)}" ${location.path ? '' : 'disabled'}>复制路径</button></div></div>
+    <div class="artifact-preview-body">${body}</div>`;
+}
+
+async function selectArtifact(key) {
+  const entry = artifactBrowser.entries.find(item => item.key === key);
+  if (!entry) return;
+  artifactBrowser.selectedKey = key;
+  renderArtifactBrowser();
+  if (!entry.text || entry.content !== undefined || entry.previewError) return;
+  const requestId = ++artifactBrowser.requestId;
+  try {
+    const result = await request(`/api/tasks/${entry.taskId}/artifacts?path=${encodeURIComponent(entry.path)}`);
+    if (requestId !== artifactBrowser.requestId || artifactBrowser.selectedKey !== key) return;
+    entry.content = result.content;
+  } catch (error) {
+    if (requestId !== artifactBrowser.requestId || artifactBrowser.selectedKey !== key) return;
+    entry.previewError = error.message;
+  }
+  renderArtifactBrowser();
+}
+
+async function openRunArtifacts(runId) {
+  const run = state.runs.find(item => item.id === runId);
+  if (!run) return;
+  const tasks = state.tasks.filter(task => task.run_id === runId && task.verified_commit && task.files?.length);
+  artifactBrowser = { run, entries: [], failures: [], selectedKey: null, requestId: artifactBrowser.requestId + 1 };
+  artifactDialog.showModal();
+  $('#artifactDialogTitle').textContent = `${run.id} 成果`;
+  $('#artifactRunStatus').textContent = 'LOADING';
+  $('#artifactRunStatus').classList.remove('warning');
+  $('#artifactRunPath').textContent = run.integration_worktree || '运行集成目录尚未准备';
+  $('#copyArtifactRunPath').disabled = !run.integration_worktree;
+  $('#openArtifactRunPath').disabled = !run.integration_worktree;
+  $('#artifactCount').textContent = '...';
+  $('#artifactList').innerHTML = '<p class="empty">正在汇总任务成果。</p>';
+  $('#artifactPreview').innerHTML = '<div class="artifact-preview-empty"><span>COLLECTING</span><strong id="artifactPreviewTitle">正在读取验收快照</strong><p>成果不需要发布到 GitHub 即可查看。</p></div>';
+
+  const result = await Promise.allSettled(tasks.map(task => request(`/api/tasks/${task.id}/artifacts`).then(listing => ({ task, listing }))));
+  if (artifactBrowser.run?.id !== runId) return;
+  for (const item of result) {
+    if (item.status === 'rejected') {
+      artifactBrowser.failures.push(item.reason?.message || '成果读取失败');
+      continue;
+    }
+    const { task, listing } = item.value;
+    for (const artifact of listing.artifacts || []) {
+      artifactBrowser.entries.push({
+        ...artifact,
+        key: `${task.id}:${artifact.path}`,
+        taskId: task.id,
+        taskTitle: task.title,
+        taskStatus: task.status,
+        commit: listing.commit,
+        projectLocation: listing.projectLocation
+      });
+    }
+  }
+  artifactBrowser.entries.sort((left, right) => Number(right.primary) - Number(left.primary)
+    || left.taskId.localeCompare(right.taskId)
+    || left.path.localeCompare(right.path));
+  const first = artifactBrowser.entries.find(entry => entry.primary && entry.text)
+    || artifactBrowser.entries.find(entry => entry.text)
+    || artifactBrowser.entries[0];
+  artifactBrowser.selectedKey = first?.key || null;
+  renderArtifactBrowser();
+  if (first) await selectArtifact(first.key);
+}
+
+async function copyArtifactPath(value) {
+  if (!value) return;
+  if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+  else {
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.append(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
+  }
+  tell('路径已复制。');
+}
+
+async function revealArtifactLocation(button, endpoint, payload = {}) {
+  button.disabled = true;
+  try {
+    await request(endpoint, { method: 'POST', body: JSON.stringify(payload) });
+    tell('已在 Windows 文件管理器中打开。');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderRuns() {
   const runsBoard = $('#runsBoard');
   const overviewBoard = $('#runOverviewBoard');
@@ -181,9 +356,11 @@ function renderRuns() {
   runsBoard.innerHTML = state.runs.map(run => {
     const tasks = state.tasks.filter(task => task.run_id === run.id);
     const merged = tasks.filter(task => task.status === 'merged').length;
+    const artifactCount = tasks.filter(task => task.verified_commit && task.files?.length).length;
+    const artifacts = artifactCount ? `<button class="small secondary" data-run-action="artifacts" data-run-id="${run.id}">查看成果</button>` : '';
     const publish = run.status === 'ready_to_publish' ? `<button class="small primary" data-action-key="run:${run.id}:publish" data-run-action="publish" data-run-id="${run.id}">发布 PR</button>` : '';
     const refresh = run.github_pr_number ? `<button class="small secondary" data-action-key="run:${run.id}:refresh" data-run-action="refresh" data-run-id="${run.id}">刷新 CI</button>` : '';
-    return `<article class="run-card status-${run.status}"><div class="task-meta"><span>${run.id}</span><span>${modeLabel(run.mode)}</span>${workspaceBadge(run)}</div><h3>${escapeHtml(run.title)}</h3><p>${escapeHtml(run.requirement)}</p><div class="run-meta"><span>${merged}/${tasks.length} 已合并</span><span>${escapeHtml(run.integration_branch)}</span><span>CI: ${escapeHtml(run.ci_status)}</span></div><div class="task-foot"><strong>${escapeHtml(run.status)}</strong><div>${publish}${refresh}${run.github_pr_url ? `<a class="small secondary" href="${escapeHtml(run.github_pr_url)}" target="_blank" rel="noreferrer">打开 PR</a>` : ''}</div></div></article>`;
+    return `<article class="run-card status-${run.status}"><div class="task-meta"><span>${run.id}</span><span>${modeLabel(run.mode)}</span>${workspaceBadge(run)}</div><h3>${escapeHtml(run.title)}</h3><p>${escapeHtml(run.requirement)}</p><div class="run-meta"><span>${merged}/${tasks.length} 已合并</span><span>${escapeHtml(run.integration_branch)}</span><span>CI: ${escapeHtml(run.ci_status)}</span></div><div class="task-foot"><strong>${escapeHtml(run.status)}</strong><div>${artifacts}${publish}${refresh}${run.github_pr_url ? `<a class="small secondary" href="${escapeHtml(run.github_pr_url)}" target="_blank" rel="noreferrer">打开 PR</a>` : ''}</div></div></article>`;
   }).join('');
 }
 
@@ -638,6 +815,7 @@ function render(nextState, health) {
   $('#conflictCount').textContent = state.approvals?.length || 0;
   $('#pendingActionCount strong').textContent = state.approvals?.length || 0;
   $('#dependsOn').innerHTML = '<option value="">无</option>' + state.tasks.filter(task => !['merged', 'cancelled'].includes(task.status)).map(task => `<option value="${task.id}">${task.id} ${escapeHtml(task.title)}</option>`).join('');
+  if (runDialog.open) syncLauncherContext();
   renderMetrics(); renderProcessMonitor(); renderApprovals(); renderAgentHealth(); renderGroups(); renderGroupConsole(); renderRuns(); renderBoard(); renderDetail(); renderReview(); renderEvents(); renderRunCommand(); refreshCommandIndex(); applyActionFeedback();
 }
 
@@ -1008,18 +1186,132 @@ function readGroupForm() {
   };
 }
 
-function openGroupSessionDialog(groupId) {
-  const group = groupById(groupId);
-  const form = $('#groupSessionForm');
-  form.reset();
-  form.querySelector('[name="groupId"]').value = groupId;
-  $('#groupSessionTarget').textContent = group ? `${group.id} / ${group.name}` : groupId;
-  groupSessionDialog.showModal();
+function launcherWorkspace() {
+  return state?.workspaces?.find(workspace => workspace.id === state.activeWorkspaceId) || null;
 }
 
-$('#openTaskDialog').addEventListener('click', () => dialog.showModal());
-$('#openTaskDialogFromTasks').addEventListener('click', () => dialog.showModal());
-$('#openRunDialog').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; runDialog.showModal(); });
+function syncLauncherContext(preferredGroupId = null) {
+  const workspace = launcherWorkspace();
+  $('#launcherProjectName').textContent = workspace?.name || state?.workspace || '尚未选择项目';
+  $('#launcherProjectPath').textContent = workspace?.path || '请先选择一个本机 Git 项目';
+
+  const groupSelect = $('#launcherGroup');
+  const previousGroupId = preferredGroupId || groupSelect.value;
+  const groups = (state?.groups || []).filter(group => group.status === 'active');
+  groupSelect.innerHTML = groups.length
+    ? groups.map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)} · ${group.members.length} 个席位</option>`).join('')
+    : '<option value="">暂无可用群组，请先创建群组</option>';
+  if (groups.some(group => group.id === previousGroupId)) groupSelect.value = previousGroupId;
+
+  $('#launcherDependsOn').innerHTML = '<option value="">无</option>' + (state?.tasks || [])
+    .filter(task => !['merged', 'cancelled'].includes(task.status))
+    .map(task => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.id)} ${escapeHtml(task.title)}</option>`).join('');
+  setLauncherMode(launcherMode);
+}
+
+function setLauncherMode(mode) {
+  launcherMode = normalizeLaunchMode(mode);
+  runDialog.dataset.launchMode = launcherMode;
+  runDialog.querySelectorAll('[data-launch-mode]').forEach(button => {
+    const active = button.dataset.launchMode === launcherMode;
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  runDialog.querySelectorAll('[data-launch-panel]').forEach(panel => { panel.hidden = panel.dataset.launchPanel !== launcherMode; });
+  const taskFiles = runDialog.querySelector('[name="taskFiles"]');
+  taskFiles.required = launcherMode === 'task';
+  const groupAvailable = Boolean($('#launcherGroup').value);
+  const submit = $('#launcherSubmit');
+  submit.textContent = launchModes[launcherMode].submitLabel;
+  submit.disabled = launcherMode === 'group' && !groupAvailable;
+  $('#launcherRouteSummary').textContent = {
+    group: groupAvailable ? '三轮讨论形成共识，确认 DAG 后进入角色接力。' : '当前项目没有可用群组，请先创建 Agent 群组。',
+    plan: '规划器只生成预览，确认后才创建运行和 worktree。',
+    task: '直接创建独立任务，启动和合并仍遵循当前运行模式。'
+  }[launcherMode];
+}
+
+function updateLauncherProgress() {
+  const elapsedMs = Math.max(0, Date.now() - launcherStartedAt);
+  const seconds = Math.floor(elapsedMs / 1000);
+  $('#launcherProgressMessage').textContent = launchProgressCopy(launcherMode, elapsedMs);
+  $('#launcherProgressTime').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function startLauncherProgress() {
+  clearInterval(launcherProgressTimer);
+  launcherStartedAt = Date.now();
+  const progress = $('#launcherProgress');
+  progress.hidden = false;
+  progress.classList.remove('is-error', 'is-complete');
+  $('#launcherProgressStage').textContent = 'REQUEST ACCEPTED';
+  updateLauncherProgress();
+  launcherProgressTimer = setInterval(updateLauncherProgress, 500);
+}
+
+function finishLauncherProgress(message, { error = false } = {}) {
+  clearInterval(launcherProgressTimer);
+  launcherProgressTimer = null;
+  const progress = $('#launcherProgress');
+  progress.hidden = false;
+  progress.classList.toggle('is-error', error);
+  progress.classList.toggle('is-complete', !error);
+  $('#launcherProgressStage').textContent = error ? 'ACTION REQUIRED' : 'READY';
+  $('#launcherProgressMessage').textContent = message;
+}
+
+function openWorkLauncher(mode = null, { groupId = null } = {}) {
+  plannedRun = null;
+  runDialog.classList.remove('has-plan');
+  $('#planPreview').hidden = true;
+  $('#launcherProgress').hidden = true;
+  clearInterval(launcherProgressTimer);
+  launcherProgressTimer = null;
+  syncLauncherContext(groupId);
+  setLauncherMode(mode || defaultLaunchMode(state?.groups || []));
+  if (groupId && $('#launcherGroup').querySelector(`option[value="${CSS.escape(groupId)}"]`)) $('#launcherGroup').value = groupId;
+  setLauncherMode(launcherMode);
+  runDialog.showModal();
+  requestAnimationFrame(() => runDialog.querySelector('[name="requirement"]')?.focus());
+}
+
+function closeWorkLauncher() {
+  clearInterval(launcherProgressTimer);
+  launcherProgressTimer = null;
+  runDialog.close();
+}
+
+function openGroupSessionDialog(groupId) {
+  openWorkLauncher('group', { groupId });
+}
+
+$('#openTaskDialog').addEventListener('click', () => openWorkLauncher('task'));
+$('#openTaskDialogFromTasks').addEventListener('click', () => openWorkLauncher('task'));
+$('#openRunDialog').addEventListener('click', () => openWorkLauncher());
+$('#closeRunDialog').addEventListener('click', closeWorkLauncher);
+$('#launcherCancel').addEventListener('click', closeWorkLauncher);
+runDialog.querySelector('.launcher-mode-picker').addEventListener('click', event => {
+  const button = event.target.closest('[data-launch-mode]');
+  if (button) setLauncherMode(button.dataset.launchMode);
+});
+$('#launcherGroup').addEventListener('change', () => setLauncherMode('group'));
+$('#launcherSwitchProject').addEventListener('click', () => {
+  reopenLauncherMode = launcherMode;
+  runDialog.close();
+  $('#workspaceSelector').click();
+});
+$('#workspaceDialog').addEventListener('close', () => {
+  if (!reopenLauncherMode) return;
+  const mode = reopenLauncherMode;
+  reopenLauncherMode = null;
+  openWorkLauncher(mode);
+});
+runDialog.addEventListener('close', () => {
+  clearInterval(launcherProgressTimer);
+  launcherProgressTimer = null;
+  dialogsUi.setBusy($('#launcherSubmit'), false);
+  dialogsUi.setBusy($('#confirmPlan'), false);
+});
 $('#openGroupDialog').addEventListener('click', () => openGroupEditor());
 $('#refresh').addEventListener('click', refresh);
 $('#pendingActionCount').addEventListener('click', () => {
@@ -1311,23 +1603,96 @@ $('#groupConsensus').addEventListener('submit', async event => {
 
 $('#runForm').addEventListener('submit', async event => {
   event.preventDefault();
-  if (event.submitter?.value === 'cancel') return runDialog.close();
-  const form = new FormData(event.currentTarget);
+  if (event.submitter?.value === 'cancel') {
+    clearInterval(launcherProgressTimer);
+    launcherProgressTimer = null;
+    return runDialog.close();
+  }
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  const requirement = String(form.get('requirement') || '').trim();
+  const submit = $('#launcherSubmit');
+  startLauncherProgress();
+  dialogsUi.setBusy(submit, true, launcherMode === 'plan' ? '规划中' : launcherMode === 'group' ? '正在启动' : '正在创建');
   try {
-    plannedRun = await request('/api/runs/plan', { method: 'POST', body: JSON.stringify({ requirement: form.get('requirement'), planner: form.get('planner') }) });
+    if (launcherMode === 'group') {
+      const groupId = String(form.get('groupId') || '');
+      if (!groupId) throw new Error('请先创建并选择一个 Agent 群组。');
+      const session = await request(`/api/groups/${groupId}/sessions`, { method: 'POST', body: JSON.stringify({ requirement }) });
+      if (form.get('startNow')) await request(`/api/group-sessions/${session.id}/start`, { method: 'POST', body: '{}' });
+      finishLauncherProgress(form.get('startNow') ? '讨论已经启动，正在打开会话。' : '会话已经创建。');
+      runDialog.close();
+      formElement.reset();
+      tell(form.get('startNow') ? `${session.id} 已启动讨论。` : `${session.id} 已创建。`);
+      await refresh();
+      await openGroupSession(session.id, groupId);
+      return;
+    }
+
+    if (launcherMode === 'task') {
+      const payload = buildStandaloneTaskPayload({
+        requirement,
+        title: form.get('taskTitle'),
+        agent: form.get('taskAgent'),
+        files: form.get('taskFiles'),
+        dependsOn: form.get('taskDependsOn'),
+        acceptance: form.get('taskAcceptance'),
+        timeoutMinutes: form.get('taskTimeoutMinutes'),
+        maxRetries: form.get('taskMaxRetries')
+      });
+      if (!payload.title) throw new Error('请填写任务需求或任务标题。');
+      if (!payload.files.length) throw new Error('请填写任务拥有的文件或目录。');
+      const task = await request('/api/tasks', { method: 'POST', body: JSON.stringify(payload) });
+      finishLauncherProgress('任务已创建，正在打开任务详情。');
+      selectedTaskId = task.id;
+      runDialog.close();
+      formElement.reset();
+      contextDock.open('task', task.id);
+      layout.setRoute({ view: 'tasks', taskId: task.id });
+      tell(`${task.id} 已创建，后续步骤遵循当前运行模式。`);
+      await refresh();
+      return;
+    }
+
+    plannedRun = await request('/api/runs/plan', { method: 'POST', body: JSON.stringify({ requirement, planner: form.get('planner') }) });
+    finishLauncherProgress('DAG 已生成，请检查任务边界后确认。');
     $('#planTitle').textContent = plannedRun.title;
     $('#planRequirement').textContent = plannedRun.requirement;
     $('#planTasks').value = JSON.stringify(plannedRun.tasks, null, 2);
     $('#planPreview').hidden = false;
-  } catch (error) { tell(error.message, 'error'); }
+    runDialog.classList.add('has-plan');
+  } catch (error) {
+    finishLauncherProgress(error.message || '发起失败，请检查配置后重试。', { error: true });
+    tell(error.message, 'error');
+  } finally {
+    dialogsUi.setBusy(submit, false);
+    if (runDialog.open && !runDialog.classList.contains('has-plan')) setLauncherMode(launcherMode);
+  }
 });
-$('#discardPlan').addEventListener('click', () => { plannedRun = null; $('#planPreview').hidden = true; });
+$('#discardPlan').addEventListener('click', () => {
+  plannedRun = null;
+  runDialog.classList.remove('has-plan');
+  $('#planPreview').hidden = true;
+  $('#launcherProgress').hidden = true;
+  setLauncherMode('plan');
+  runDialog.querySelector('[name="requirement"]')?.focus();
+});
 $('#confirmPlan').addEventListener('click', async () => {
+  const button = $('#confirmPlan');
   try {
+    dialogsUi.setBusy(button, true, '正在创建');
     const tasks = JSON.parse($('#planTasks').value);
     const run = await request('/api/runs', { method: 'POST', body: JSON.stringify({ planId: plannedRun.id, title: $('#planTitle').textContent, tasks }) });
-    tell(`${run.id} 已创建，集成分支和任务已准备。`); runDialog.close(); layout.setRoute({ view: 'runs', runId: run.id }); await refresh();
-  } catch (error) { tell(error.message || '任务 JSON 无效。', 'error'); }
+    tell(`${run.id} 已创建，集成分支和任务已准备。`);
+    runDialog.close();
+    $('#runForm').reset();
+    layout.setRoute({ view: 'runs', runId: run.id });
+    await refresh();
+  } catch (error) {
+    tell(error.message || '任务 JSON 无效。', 'error');
+  } finally {
+    dialogsUi.setBusy(button, false);
+  }
 });
 
 $('#taskForm').addEventListener('submit', async event => {
@@ -1358,11 +1723,36 @@ board.addEventListener('change', async event => {
 });
 $('#runsBoard').addEventListener('click', async event => {
   const action = event.target.closest('[data-run-action]'); if (!action) return;
+  if (action.dataset.runAction === 'artifacts') {
+    try { await openRunArtifacts(action.dataset.runId); }
+    catch (error) { tell(error.message, 'error'); }
+    return;
+  }
   try {
     const endpoint = action.dataset.runAction === 'publish' ? 'publish' : 'refresh';
     await withActionFeedback(`run:${action.dataset.runId}:${endpoint}`, endpoint === 'publish' ? '正在发布 PR' : '正在刷新 CI', endpoint === 'publish' ? 'PR 已发布' : 'CI 已刷新', () => request(`/api/runs/${action.dataset.runId}/${endpoint}`, { method: 'POST', body: '{}' }));
     tell(endpoint === 'publish' ? '运行分支已推送并创建 PR。' : 'CI 状态已刷新。'); await refresh();
   } catch (error) { tell(error.message, 'error'); }
+});
+$('#closeArtifactDialog').addEventListener('click', () => artifactDialog.close());
+$('#dismissArtifactDialog').addEventListener('click', () => artifactDialog.close());
+$('#copyArtifactRunPath').addEventListener('click', () => copyArtifactPath(artifactBrowser.run?.integration_worktree).catch(error => tell(error.message, 'error')));
+$('#openArtifactRunPath').addEventListener('click', event => {
+  if (!artifactBrowser.run) return;
+  void revealArtifactLocation(event.currentTarget, `/api/runs/${artifactBrowser.run.id}/reveal`).catch(error => tell(error.message, 'error'));
+});
+$('#artifactList').addEventListener('click', event => {
+  const button = event.target.closest('[data-artifact-key]');
+  if (button) void selectArtifact(button.dataset.artifactKey);
+});
+$('#artifactPreview').addEventListener('click', event => {
+  const reveal = event.target.closest('[data-reveal-artifact]');
+  if (reveal) {
+    void revealArtifactLocation(reveal, `/api/tasks/${reveal.dataset.taskId}/artifacts/reveal`, { path: reveal.dataset.artifactPath }).catch(error => tell(error.message, 'error'));
+    return;
+  }
+  const button = event.target.closest('[data-copy-artifact-path]');
+  if (button) void copyArtifactPath(button.dataset.copyArtifactPath).catch(error => tell(error.message, 'error'));
 });
 $('#reviewContent').addEventListener('click', async event => {
   const button = event.target.closest('[data-review-approve]'); if (!button) return;

@@ -43,13 +43,30 @@ assert.deepEqual(configExample.agents['claude-code'].health.requiredOptions, ['-
 for (const id of ['appNav', 'appTopbar', 'workspaceMain', 'contextInspector', 'inspectorResizeHandle']) {
   assert.equal(html.includes(`id="${id}"`), true, `Desktop shell is missing #${id}.`);
 }
-for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCount', 'contextDockViewport']) {
+for (const id of ['runStageBar', 'nextAction', 'commandSearch', 'pendingActionCount', 'contextDockViewport', 'runDialog', 'launcherProjectName', 'launcherModePicker', 'launcherProgress', 'launcherSubmit']) {
   assert.equal(html.includes(`id="${id}"`), true, `Adaptive workbench is missing #${id}.`);
 }
+for (const id of ['closeRunDialog', 'launcherCancel']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Work launcher needs an explicit #${id} close control.`);
+}
+assert.equal(script.includes('closeWorkLauncher'), true, 'Work launcher cancel controls must close explicitly instead of relying on form submit.');
+for (const mode of ['group', 'plan', 'task']) assert.equal(html.includes(`data-launch-mode="${mode}"`), true, `Work launcher is missing ${mode} mode.`);
+assert.equal(script.includes('openWorkLauncher'), true, 'Primary creation entry must use the unified work launcher.');
+assert.equal(script.includes('launchProgressCopy'), true, 'Long-running launcher actions need immediate staged feedback.');
+assert.equal(componentsCss.includes('.work-launcher-dialog'), true, 'Unified work launcher needs a dedicated desktop layout.');
 assert.equal(html.includes('id="taskStreamTools"'), true, 'Task output must reserve a surface for expandable tool events.');
 for (const id of ['workspaceSelector', 'workspaceDialog', 'workspaceList', 'workspacePath', 'workspaceBrowser', 'workspaceValidation', 'pickWorkspaceDirectory', 'validateWorkspace', 'selectWorkspace', 'openMobileConnection', 'mobileConnectionDialog', 'mobileServiceForm', 'mobileAccessEnabled', 'mobileBindHost', 'mobilePublicUrl', 'saveMobileService', 'mobileAccountForm', 'mobileAccountUsername', 'mobileAccountPassword', 'saveMobileAccount', 'mobileDeviceList']) {
   assert.equal(html.includes(`id="${id}"`), true, `Workspace selection is missing #${id}.`);
 }
+for (const id of ['artifactDialog', 'artifactRunPath', 'artifactList', 'artifactPreview', 'copyArtifactRunPath', 'openArtifactRunPath']) {
+  assert.equal(html.includes(`id="${id}"`), true, `Run artifacts are missing #${id}.`);
+}
+assert.equal(script.includes('data-run-action="artifacts"'), true, 'Verified runs must expose a local artifact action.');
+assert.equal(script.includes('/artifacts?path='), true, 'Artifact browser must preview verified text files.');
+assert.equal(script.includes('/artifacts/reveal'), true, 'Artifact browser must locate verified files in Windows Explorer.');
+assert.equal(server.includes("action === 'reveal'"), true, 'Run artifacts must expose a local Windows Explorer action.');
+assert.equal(server.includes('DESKTOP_LOCAL_ONLY'), true, 'Windows Explorer actions must remain local-only.');
+assert.equal(componentsCss.includes('.artifact-browser'), true, 'Artifact browser needs a stable desktop split layout.');
 assert.equal(script.includes('createWorkspaceController'), true, 'The app must initialize the workspace controller.');
 for (const endpoint of ['/api/workspaces', '/api/workspaces/validate', '/api/filesystem/directories', '/api/filesystem/pick-directory']) {
   assert.equal(workspaceModule.includes(endpoint), true, `Workspace UI is missing ${endpoint}.`);
@@ -92,10 +109,20 @@ assert.match(shellCss, /grid-template-columns:[^;]*var\(--inspector-width\)/);
 assert.equal(tokensCss.includes('--motion-tab:160ms'), true, 'Context tab motion must use the approved fast timing.');
 assert.equal(tokensCss.includes('--motion-open:200ms'), true, 'Context opening must complete in 200ms.');
 assert.equal(tokensCss.includes('--motion-close:160ms'), true, 'Context closing must complete in 160ms.');
+assert.equal(tokensCss.includes('--material-panel'), true, 'Apple-style polish needs reusable material surface tokens.');
+assert.equal(tokensCss.includes('--ease-fluid'), true, 'Apple-style polish needs a shared fluid easing curve.');
 assert.equal(shellCss.includes('52px'), true, 'Collapsed context dock must retain a 52px reopen rail.');
 assert.equal(shellCss.includes('.is-discussion-context'), true, 'Discussion context needs a dedicated dark surface.');
+assert.equal(shellCss.includes('prefers-reduced-transparency'), true, 'Translucent chrome must provide a reduced-transparency fallback.');
+assert.equal(shellCss.includes('.inspector-reopen::before'), true, 'Compact context rail needs a visible grab affordance.');
+assert.equal(componentsCss.includes('touch-action:manipulation'), true, 'Interactive controls need immediate touch feedback.');
+assert.equal(componentsCss.includes('dialog-materialize'), true, 'Dialogs should materialize with a short spatial transition.');
+assert.equal(viewsCss.includes('backdrop-filter:blur(16px) saturate(150%)'), true, 'Run command chrome should use a restrained translucent material.');
 assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.summary-grid\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 assert.match(shellCss, /@media\(max-width:1120px\)[\s\S]*?\.topbar-context\{display:none\}/);
+assert.equal(shellCss.includes('body{min-width:900px}'), false, 'Compact layouts must not force a desktop-width canvas.');
+assert.match(shellCss, /@media\(max-width:760px\)[\s\S]*?\.app-nav\{position:fixed/, 'Compact layouts need dedicated bottom navigation.');
+assert.equal(contextDockModule.includes("matchMedia?.('(max-width: 760px)')"), true, 'The context dock must start collapsed on compact layouts.');
 assert.equal(layoutModule.includes('createContextDock'), true, 'Layout must delegate inspector behavior to the shared context dock.');
 assert.equal(contextDockModule.includes('aria-valuenow'), true, 'The context dock resize separator must expose its current width.');
 assert.equal(apiModule.includes('Last-Event-ID'), true);
@@ -112,7 +139,7 @@ assert.equal(viewsCss.includes('.group-turn-progress'), true, 'Active group turn
 assert.equal(dialogsModule.includes('createDialogs'), true);
 const streamEndpointSource = server.slice(server.indexOf("url.pathname === '/api/stream'"), server.indexOf("url.pathname === '/api/state'"));
 const broadcastSource = server.slice(server.indexOf('function broadcast'), server.indexOf('function appendEvent'));
-for (const modulePath of ['ui/context-dock.js', 'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js']) {
+for (const modulePath of ['ui/context-dock.js', 'ui/render-scheduler.js', 'ui/run-stage.js', 'ui/command-search.js', 'ui/action-feedback.js', 'ui/work-launcher.js']) {
   assert.equal(server.includes(`'${modulePath}'`), true, `Static server must expose ${modulePath}.`);
 }
 assert.match(streamEndpointSource, /last-event-id/i);

@@ -35,6 +35,9 @@ export function createContextDock({
   const viewport = root.querySelector('[data-context-viewport]') || root.querySelector('.inspector-content') || root;
   const tabsRoot = root.querySelector('[data-context-tabs]');
   let state = loadState(storage);
+  if (globalThis.matchMedia?.('(max-width: 760px)').matches) {
+    state = updateContextState(state, { collapsed: true });
+  }
   let dragging = false;
 
   const save = () => storage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(state));

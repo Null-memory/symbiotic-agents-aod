@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { deliveryArtifactGuidance, taskArtifactDescriptor, verificationSnapshotProblem } from './task-delivery-domain.mjs';
+import { deliveryArtifactGuidance, resolveArtifactRevealTarget, taskArtifactDescriptor, verificationSnapshotProblem, windowsExplorerRevealInvocation } from './task-delivery-domain.mjs';
 
 test('blocks verification when the task worktree contains uncommitted artifacts', () => {
   assert.match(verificationSnapshotProblem({
@@ -42,4 +42,16 @@ test('classifies task-owned delivery artifacts for the console', () => {
   assert.equal(taskArtifactDescriptor('scripts/run.cmd').kind, 'launcher');
   assert.equal(taskArtifactDescriptor('scripts/README.md').kind, 'guide');
   assert.equal(taskArtifactDescriptor('src/index.ts').kind, 'source');
+});
+
+test('builds a Windows Explorer reveal only inside the registered artifact root', () => {
+  const target = resolveArtifactRevealTarget('E:\\runs\\RUN-001', 'outputs/report.md');
+  assert.equal(target, 'E:\\runs\\RUN-001\\outputs\\report.md');
+  assert.deepEqual(windowsExplorerRevealInvocation(target, true), {
+    command: 'explorer.exe',
+    args: ['/select,E:\\runs\\RUN-001\\outputs\\report.md'],
+  });
+  assert.throws(() => resolveArtifactRevealTarget('E:\\runs\\RUN-001', '../secret.txt'), /escapes/);
+  assert.throws(() => resolveArtifactRevealTarget('E:\\runs\\RUN-001', 'C:\\Windows\\win.ini'), /relative artifact path/);
+  assert.throws(() => windowsExplorerRevealInvocation('outputs\\report.md', true), /absolute target path/);
 });

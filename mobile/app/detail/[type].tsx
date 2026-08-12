@@ -26,25 +26,47 @@ export default function DetailScreen() {
   useEffect(() => {
     if (!connection || !params.id) return;
     let active = true;
-    const path = params.type === 'group' ? `/api/group-sessions/${params.id}` : params.type === 'run' ? `/api/runs/${params.id}` : `/api/tasks/${params.id}`;
-    const requests = [mobileRequest<any>(connection, path)];
-    if (params.type === 'group') requests.push(mobileRequest<any[]>(connection, `/api/group-sessions/${params.id}/messages`));
-    if (params.type === 'task') {
-      requests.push(mobileRequest<any[]>(connection, `/api/tasks/${params.id}/logs`));
-      requests.push(mobileRequest<any>(connection, `/api/tasks/${params.id}/artifacts`));
-    }
-    Promise.all(requests).then(([main, secondary, taskArtifacts]) => {
+    setError(null);
+    setArtifacts(null);
+    const load = async () => {
+      const path = params.type === 'group' ? `/api/group-sessions/${params.id}` : params.type === 'run' ? `/api/runs/${params.id}` : `/api/tasks/${params.id}`;
+      const main = await mobileRequest<any>(connection, path);
       if (!active) return;
       setDetail(main);
       if (params.type === 'group') {
-        setMessages(secondary || []);
+        const groupMessages = await mobileRequest<any[]>(connection, `/api/group-sessions/${params.id}/messages`);
+        if (!active) return;
+        setMessages(groupMessages || []);
         setConsensusDraft(main.consensus ? JSON.parse(JSON.stringify(main.consensus)) : null);
       }
       if (params.type === 'task') {
-        setLogs(secondary || []);
+        const [taskLogs, taskArtifacts] = await Promise.all([
+          mobileRequest<any[]>(connection, `/api/tasks/${params.id}/logs`),
+          mobileRequest<any>(connection, `/api/tasks/${params.id}/artifacts`),
+        ]);
+        if (!active) return;
+        setLogs(taskLogs || []);
         setArtifacts(taskArtifacts || null);
       }
-    }).catch(reason => active && setError(reason instanceof Error ? reason.message : '无法读取详情。'));
+      if (params.type === 'run') {
+        const verifiedTasks = (main.tasks || []).filter((task: any) => task.verified_commit && task.files?.length);
+        const listings = await Promise.allSettled(verifiedTasks.map((task: any) => mobileRequest<any>(connection, `/api/tasks/${task.id}/artifacts`).then(result => ({ task, result }))));
+        if (!active) return;
+        const runArtifacts = listings.flatMap(item => item.status === 'fulfilled'
+          ? (item.value.result.artifacts || []).map((artifact: any) => ({
+            ...artifact,
+            taskId: item.value.task.id,
+            taskTitle: item.value.task.title,
+            taskStatus: item.value.task.status,
+            commit: item.value.result.commit,
+            projectLocation: item.value.result.projectLocation,
+          }))
+          : []);
+        runArtifacts.sort((left: any, right: any) => Number(right.primary) - Number(left.primary) || String(left.path).localeCompare(String(right.path)));
+        setArtifacts({ projectLocation: main.integration_worktree, artifacts: runArtifacts, failedTasks: listings.filter(item => item.status === 'rejected').length });
+      }
+    };
+    load().catch(reason => active && setError(reason instanceof Error ? reason.message : '无法读取详情。'));
     return () => { active = false; };
   }, [connection, params.id, params.type]);
 
@@ -77,7 +99,7 @@ export default function DetailScreen() {
       }} /> : null}
       {groupTab === 'consensus' ? <GroupConsensusEditor consensus={consensusDraft} members={detail.members || []} onChange={setConsensusDraft} /> : null}
     </> : <>
-      {params.type === 'run' ? <RunTasks run={detail} /> : null}
+      {params.type === 'run' ? <><RunArtifacts run={detail} result={artifacts} connection={connection} /><RunTasks run={detail} /></> : null}
       {params.type === 'task' ? <TaskArtifacts task={detail} result={artifacts} connection={connection} /> : null}
       {action ? <View style={detailStyles.actionArea}>{action}</View> : null}
       {review ? <ConflictReview review={review} runAction={runAction} refresh={refresh} /> : null}
@@ -155,46 +177,60 @@ function RunTasks({ run }: { run: any }) {
   </>;
 }
 
+function RunArtifacts({ run, result, connection }: { run: any; result: any; connection: any }) {
+  return <ArtifactCollection owner={run} result={result} connection={connection} runMode />;
+}
+
 function TaskArtifacts({ task, result, connection }: { task: any; result: any; connection: any }) {
-  const items = result?.artifacts || [];
-  const primary = items.find((item: any) => item.primary && item.text) || items.find((item: any) => item.text);
-  const [selectedPath, setSelectedPath] = useState('');
-  const [preview, setPreview] = useState<any>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!selectedPath && primary?.path) setSelectedPath(primary.path);
-  }, [primary?.path, selectedPath]);
-
-  useEffect(() => {
-    if (!connection || !selectedPath) return;
-    let active = true;
-    setLoading(true);
-    setPreviewError(null);
-    mobileRequest<any>(connection, `/api/tasks/${task.id}/artifacts?path=${encodeURIComponent(selectedPath)}`)
-      .then(value => { if (active) setPreview(value); })
-      .catch(reason => { if (active) setPreviewError(reason instanceof Error ? reason.message : '无法读取交付物。'); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [connection, selectedPath, task.id]);
-
   return <>
     {task.status === 'merge_ready' ? <Card style={detailStyles.gateCard}>
       <View style={detailStyles.noticeTitle}><Ionicons name="checkmark-circle-outline" size={21} color={colors.accent} /><Text style={detailStyles.sectionTitle}>任务已完成，等待合并</Text></View>
       <Text style={detailStyles.helper}>已验收 commit：{String(task.verified_commit || '').slice(0, 12) || '未记录'}。点击下方文档即可查看实际成品。</Text>
     </Card> : null}
+    <ArtifactCollection owner={task} result={result} connection={connection} />
+  </>;
+}
+
+function ArtifactCollection({ owner, result, connection, runMode = false }: { owner: any; result: any; connection: any; runMode?: boolean }) {
+  const items = result?.artifacts || [];
+  const primary = items.find((item: any) => item.primary && item.text) || items.find((item: any) => item.text);
+  const [selected, setSelected] = useState<any>(null);
+  const [preview, setPreview] = useState<any>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setSelected(primary || null);
+    setPreview(null);
+    setPreviewError(null);
+  }, [owner.id, primary?.path, primary?.taskId]);
+
+  useEffect(() => {
+    if (!connection || !selected?.path) return;
+    let active = true;
+    setLoading(true);
+    setPreview(null);
+    setPreviewError(null);
+    const taskId = selected.taskId || owner.id;
+    mobileRequest<any>(connection, `/api/tasks/${taskId}/artifacts?path=${encodeURIComponent(selected.path)}`)
+      .then(value => { if (active) setPreview(value); })
+      .catch(reason => { if (active) setPreviewError(reason instanceof Error ? reason.message : '无法读取交付物。'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [connection, owner.id, selected?.path, selected?.taskId]);
+
+  return <>
     <Card>
-      <Text style={detailStyles.sectionTitle}>成品输出</Text>
-      <Text selectable style={detailStyles.projectPath}>工程位置：{result?.projectLocation || task.worktree || '未创建 worktree'}</Text>
-      {!result ? <ActivityIndicator color={colors.accent} /> : items.length ? items.map((item: any) => <Pressable key={item.path} disabled={!item.text} onPress={() => setSelectedPath(item.path)} style={({ pressed }) => [detailStyles.artifactRow, selectedPath === item.path && detailStyles.artifactRowActive, pressed && detailStyles.rowPressed]}>
+      <View style={detailStyles.artifactSectionHead}><View style={detailStyles.rowCopy}><Text style={detailStyles.sectionTitle}>{runMode ? '运行成果' : '成品输出'}</Text><Text style={detailStyles.helper}>{runMode ? '无需发布 PR，可直接查看所有任务的已验收成果。' : '内容固定来自任务验收时的 Git commit。'}</Text></View>{items.length ? <StatusPill value={`${items.length} 项`} tone="accent" /> : null}</View>
+      <Text selectable style={detailStyles.projectPath}>{runMode ? '运行集成目录' : '工程位置'}：{result?.projectLocation || owner.integration_worktree || owner.worktree || '尚未准备'}</Text>
+      {!result ? <ActivityIndicator color={colors.accent} /> : items.length ? items.map((item: any) => <Pressable key={`${item.taskId || owner.id}:${item.path}`} disabled={!item.text} onPress={() => setSelected(item)} style={({ pressed }) => [detailStyles.artifactRow, selected?.path === item.path && (selected?.taskId || owner.id) === (item.taskId || owner.id) && detailStyles.artifactRowActive, pressed && detailStyles.rowPressed]}>
         <View style={detailStyles.artifactIcon}><Ionicons name={item.kind === 'document' ? 'document-text-outline' : item.kind === 'launcher' ? 'play-circle-outline' : item.kind === 'guide' ? 'book-outline' : 'code-slash-outline'} size={20} color={item.primary ? colors.accent : colors.muted} /></View>
-        <View style={detailStyles.rowCopy}><Text style={detailStyles.rowTitle}>{item.name}</Text><Text style={detailStyles.helper}>{item.path} · {formatBytes(item.size)}{item.text ? ' · 可预览' : ''}</Text></View>
+        <View style={detailStyles.rowCopy}><Text style={detailStyles.rowTitle}>{item.name}</Text><Text style={detailStyles.helper}>{item.taskId ? `${item.taskId} · ` : ''}{item.path} · {formatBytes(item.size)}{item.text ? ' · 可预览' : ''}</Text></View>
         {item.primary ? <StatusPill value="成品" tone="accent" /> : null}
-      </Pressable>) : <Text style={detailStyles.helper}>当前验收 commit 中没有可用的交付物。</Text>}
+      </Pressable>) : <Text style={detailStyles.helper}>{result?.failedTasks ? '部分任务成果读取失败，请下拉刷新重试。' : '当前验收 commit 中没有可用的交付物。'}</Text>}
     </Card>
-    {selectedPath ? <Card>
-      <Text style={detailStyles.sectionTitle}>{selectedPath}</Text>
+    {selected ? <Card style={detailStyles.previewCard}>
+      <View style={detailStyles.artifactSectionHead}><View style={detailStyles.rowCopy}><Text style={detailStyles.sectionTitle}>{selected.name || selected.path}</Text><Text style={detailStyles.helper}>{selected.taskTitle ? `${selected.taskId} · ${selected.taskTitle} · ` : ''}验收快照 {String(selected.commit || result?.commit || owner.verified_commit || '').slice(0, 8) || '未记录'}</Text></View><Ionicons name="shield-checkmark-outline" size={20} color={colors.accent} /></View>
       {loading ? <ActivityIndicator color={colors.accent} /> : previewError ? <Text style={detailStyles.inlineError}>{previewError}</Text> : <Text selectable style={detailStyles.artifactContent}>{preview?.content || '文件内容为空。'}</Text>}
     </Card> : null}
   </>;
@@ -267,6 +303,8 @@ const detailStyles = {
   artifactRow: { minHeight: 58, flexDirection: 'row' as const, alignItems: 'center' as const, gap: spacing.sm, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
   artifactRowActive: { paddingHorizontal: spacing.sm, borderRadius: radius.control, borderBottomColor: colors.accent, backgroundColor: '#edf7f5' },
   artifactIcon: { width: 36, height: 36, alignItems: 'center' as const, justifyContent: 'center' as const, borderRadius: radius.control, backgroundColor: colors.surfaceSubtle },
+  artifactSectionHead: { flexDirection: 'row' as const, alignItems: 'flex-start' as const, justifyContent: 'space-between' as const, gap: spacing.sm },
+  previewCard: { borderColor: '#b9d8d3', backgroundColor: '#fbfdfd' },
   rowCopy: { flex: 1, gap: 3 },
   rowTitle: { color: colors.text, fontSize: 13, fontWeight: '800' as const },
   rowPressed: { opacity: 0.68 },
