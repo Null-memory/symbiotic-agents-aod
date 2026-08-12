@@ -5,7 +5,7 @@ import { extname, resolve, sep } from 'node:path';
 const root = resolve(process.cwd());
 const distRoot = resolve(root, 'dist');
 const indexPath = resolve(distRoot, 'index.html');
-const backend = new URL(process.env.AOD_BACKEND_URL || 'http://127.0.0.1:4830');
+const backend = new URL(process.env.AOD_BACKEND_URL || 'http://127.0.0.1:4821');
 const host = process.env.AOD_PREVIEW_HOST || '127.0.0.1';
 const port = Number(process.env.AOD_PREVIEW_PORT || 4173);
 
@@ -75,4 +75,3 @@ server.listen(port, host, () => {
   console.log(`AOD backend: ${backend.origin}`);
   console.log(`Android emulator URL: http://10.0.2.2:${port}`);
 });
-

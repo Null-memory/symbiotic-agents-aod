@@ -223,7 +223,7 @@ Windows 文件夹选择器由本机 AOD 服务调用，仅在服务和 Chrome �
 
 ### 4.2 连接 Android 移动端
 
-移动端位于 `mobile/`，第一版使用 Android + Expo，通过 Tailscale 连接运行中的 Windows AOD。移动访问默认关闭，启动前配置：
+移动端位于 `mobile/`，第一版使用 Android + Expo，连接运行中的 Windows AOD。移动访问默认关闭，启动前配置：
 
 ```powershell
 $env:AOD_MOBILE_ENABLED = "1"
@@ -233,6 +233,24 @@ npm start
 ```
 
 将 `100.x.x.x` 替换为 Windows 的 Tailscale IPv4 地址，并在 Windows 防火墙中允许端口。桌面端顶栏的“手机连接”中先设置移动账号，Android App 输入 AOD 地址、用户名、密码和设备名称登录。服务端只保存密码哈希，登录成功后手机保存独立设备令牌；设备可以在桌面端撤销，GitHub CLI 登录和设备授权仍在桌面端完成。
+
+同一 Wi-Fi 下也可以使用 Windows 的局域网 IPv4 地址，例如 `http://192.168.1.10:4821`；远程访问建议使用 Tailscale 或 VPN 地址。真实手机不能填写 `127.0.0.1` 或 Android 模拟器专用的 `10.0.2.2`，因为它们指向手机或模拟器自身。
+
+APK 不提交进 Git 仓库。需要安装包时，优先从项目的 GitHub Releases 下载 `AOD-Mobile-*.apk`；如果暂时没有附件，可在 `mobile/` 下自行构建：
+
+```powershell
+cd mobile
+npm install
+npm run android:apk
+```
+
+`android:apk` 使用 EAS preview 配置生成可侧载安装的 APK。首次构建通常会要求登录 Expo 并配置 Android 签名凭据。构建完成后，可将下载到本机的 APK 作为 GitHub Release 附件上传：
+
+```powershell
+gh release create mobile-v0.2.3-preview .\AOD-Mobile-0.2.3-arm64-preview.apk --title "AOD Mobile v0.2.3 Preview" --notes "Experimental APK build. Use with caution."
+```
+
+若要面向应用商店发布，请使用 `npm run android:aab` 生成 Android App Bundle。
 
 开发移动端：
 
@@ -626,7 +644,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4821/api/maintenance/cleanu
 ## 15. 当前限制
 
 - 仅支持单机、单操作者和本地 Git 仓库。
-- Android 移动端需要 Tailscale 和正在运行的 Windows AOD；第一版不提供云端访问、iOS 客户端或推送通知。
+- Android 移动端需要局域网、Tailscale 或 VPN 连接到正在运行的 Windows AOD；第一版不提供云端访问、iOS 客户端或推送通知。
 - GitHub PR 最终合并必须人工完成。
 - AOD 不负责安装、登录或升级 Agent CLI。
 - Agent 的实际质量取决于提示词、CLI 能力、模型权限和任务文件边界。

@@ -8,13 +8,30 @@
 
 完整操作步骤参见：[中文使用指南](docs/USER_GUIDE.zh-CN.md)。
 
-## 启动
+## 本机部署
+
+AOD 当前是本机运行的 Node.js 桌面 Web 服务，不是已经打包好的桌面安装器。建议先在一台有 Git、Node.js 24 和目标 Agent CLI 的 Windows 机器上部署：
 
 ```powershell
+git clone https://github.com/Null-memory/symbiotic-agents-aod.git
+cd symbiotic-agents-aod
+npm install
+Copy-Item .\aod.config.example.json .\.aod.config.json
+notepad .\.aod.config.json
+npm run check
 npm start
 ```
 
 打开 `http://127.0.0.1:4821`。项目目录必须是一个至少有一条提交记录的 Git 仓库，才能创建 worktree。
+
+`.aod.config.json` 只保存本机 CLI 启动命令和参数模板，已被 Git 忽略；不要把 API Key、账号密码或签名文件提交到仓库。若需要换端口，可以在启动前设置：
+
+```powershell
+$env:PORT = "4821"
+npm start
+```
+
+面向他人试用时，建议只发布源码仓库和 GitHub Release 附件；不要提交 `.aod/` 数据库、`.aod.config.json`、`node_modules/`、Android 签名文件或本地构建目录。
 
 ## 项目工作区
 
@@ -29,11 +46,34 @@ npm start
 ```powershell
 $env:AOD_MOBILE_ENABLED = "1"
 $env:AOD_BIND_HOST = "0.0.0.0"
-$env:AOD_PUBLIC_URL = "http://192.168.x.x:4830"
+$env:AOD_PUBLIC_URL = "http://192.168.x.x:4821"
 npm start
 ```
 
 将 `AOD_PUBLIC_URL` 替换为桌面端“手机连接”里显示的可访问地址；同一 Wi-Fi 下通常是 Windows 的局域网地址，远程网络可使用 Tailscale 或 VPN 地址。需要在 Windows 防火墙中允许对应端口。桌面端点击顶栏“手机连接”，先设置一个移动账号；Android App 输入 AOD 地址、用户名和密码登录。登录成功后会保存独立设备令牌，设备仍可在桌面端撤销。移动端与 Windows 必须同时在线，GitHub CLI 登录仍在桌面端完成。
+
+### APK 获取与发布
+
+APK 不应直接提交进 Git 仓库。给手机安装时优先使用 GitHub Releases 中上传的 `AOD-Mobile-*.apk`；如果 Release 暂时没有附件，可以按下面步骤自行构建：
+
+```powershell
+cd mobile
+npm install
+npm run android:apk
+```
+
+`android:apk` 使用 EAS preview 配置生成可侧载安装的 APK，首次运行通常会要求登录 Expo 并配置 Android 签名凭据。构建完成后，EAS 输出会给出 APK 下载地址。下载到本机后可作为 GitHub Release 附件上传：
+
+```powershell
+gh release create mobile-v0.2.3-preview .\AOD-Mobile-0.2.3-arm64-preview.apk --title "AOD Mobile v0.2.3 Preview" --notes "Experimental APK build. Use with caution."
+```
+
+如果要提交到应用商店，请改用：
+
+```powershell
+cd mobile
+npm run android:aab
+```
 
 移动端开发命令：
 

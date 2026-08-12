@@ -22,7 +22,7 @@ export function normalizeBaseUrl(value: string) {
   const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
   let parsed: URL;
   try { parsed = new URL(candidate); } catch {
-    throw new MobileApiError('AOD 地址格式不正确，请输入类似 http://192.168.1.10:4830 的地址。', 0, 'MOBILE_URL_INVALID');
+    throw new MobileApiError('AOD 地址格式不正确，请输入类似 http://192.168.1.10:4821 的地址。', 0, 'MOBILE_URL_INVALID');
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new MobileApiError('AOD 地址必须使用 http:// 或 https://。', 0, 'MOBILE_URL_INVALID');

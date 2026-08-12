@@ -32,7 +32,7 @@ assert.match(files.connect, /loginMobile/);
 assert.match(files.connect, /用户名/);
 assert.match(files.connect, /密码/);
 assert.match(files.connect, /局域网、Tailscale 或 VPN 地址/);
-assert.match(files.connect, /192\.168\.1\.10:4830/);
+assert.match(files.connect, /192\.168\.1\.10:4821/);
 assert.equal(files.connect.includes('CameraView'), false);
 assert.equal(files.connect.includes('二维码'), false);
 assert.match(files.detail, /ConfirmButton/);
