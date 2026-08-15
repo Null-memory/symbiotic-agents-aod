@@ -6,7 +6,7 @@
 - Browser: Google Chrome 150.0.7871.128
 - Browser control: native Chrome DevTools Protocol on `127.0.0.1:9223`
 - Application: `http://127.0.0.1:4825`
-- Worktree: `E:\多agent协同-agent-groups`
+- Worktree: `<control-worktree>`
 - Mobile verification: out of scope for this desktop phase
 
 The Codex in-app browser was not used.

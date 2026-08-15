@@ -369,7 +369,7 @@ git commit -m "feat: add workbench search and inline actions"
 - Modify: `ui/state.js`
 - Modify: `frontend-test.mjs`
 - Modify: `README.md`
-- Modify: `C:\Users\Lenovo\project-promot-intro.md`
+- Modify: `<external-user-guide>`
 
 - [ ] **Step 1: Add failing regression assertions for coalesced SSE refreshes**
 
@@ -410,7 +410,7 @@ git add app.js ui/state.js frontend-test.mjs README.md
 git commit -m "feat: complete adaptive agent workbench"
 ```
 
-`C:\Users\Lenovo\project-promot-intro.md` is a user-owned guide outside this Git worktree. Update it in the same step, verify it separately, and do not attempt to stage it in this repository.
+`<external-user-guide>` is a user-owned guide outside this Git worktree. Update it in the same step, verify it separately, and do not attempt to stage it in this repository.
 
 ### Task 9: Real Chrome Desktop Verification
 

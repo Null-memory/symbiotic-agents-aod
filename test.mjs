@@ -180,7 +180,7 @@ try {
         profileDefaults: { task: { profileKey: 'inherit', effort: 'medium' }, discussion: { profileKey: 'inherit', effort: 'low' }, review: { profileKey: 'inherit', effort: 'medium' }, repair: { profileKey: 'inherit', effort: 'medium' } },
         profileArgs: { model: ['profile={{model}}'], effort: ['effort={{effort}}'] }
       },
-      antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], reviewArgs: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('ghp_1234567890abcdefghijklmnopqrstuvwxyz');process.exit(3)"] } }
+      antigravity: { command: process.execPath, args: ['-e', fakeAntigravity], reviewArgs: ['-e', fakeAntigravity], health: { versionArgs: ['--version'], authArgs: ['-e', "console.error('Bearer fixture-secret-value-1234567890');process.exit(3)"] } }
     }
   }));
   daemon = spawn(process.execPath, ['server.mjs'], {
