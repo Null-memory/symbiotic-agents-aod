@@ -31,7 +31,6 @@ $env:PORT = "4821"
 npm start
 ```
 
-面向他人试用时，建议只发布源码仓库和 GitHub Release 附件；不要提交 `.aod/` 数据库、`.aod.config.json`、`node_modules/`、Android 签名文件或本地构建目录。
 
 ## 项目工作区
 
@@ -54,7 +53,7 @@ npm start
 
 ### APK 获取与发布
 
-APK 不应直接提交进 Git 仓库。给手机安装时优先使用 GitHub Releases 中上传的 `AOD-Mobile-*.apk`；如果 Release 暂时没有附件，可以按下面步骤自行构建：
+给手机安装时优先使用 GitHub Releases 中上传的 `AOD-Mobile-*.apk`；如果 Release 暂时没有附件，可以按下面步骤自行构建：
 
 ```powershell
 cd mobile
@@ -68,12 +67,6 @@ npm run android:apk
 gh release create mobile-v0.2.3-preview .\AOD-Mobile-0.2.3-arm64-preview.apk --title "AOD Mobile v0.2.3 Preview" --notes "Experimental APK build. Use with caution."
 ```
 
-如果要提交到应用商店，请改用：
-
-```powershell
-cd mobile
-npm run android:aab
-```
 
 移动端开发命令：
 
